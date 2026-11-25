@@ -1,0 +1,6 @@
+{
+  "name": "DailyDrop — Tolichowki Water & Cold Drinks",
+  "description": "Hyperlocal drinking water cans and cold drinks delivery platform within a 3 km radius of Tolichowki, Hyderabad.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": []
+}
