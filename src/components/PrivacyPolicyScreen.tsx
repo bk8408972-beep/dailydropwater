@@ -7,7 +7,7 @@ interface PrivacyPolicyScreenProps {
 
 export function PrivacyPolicyScreen({ onBackToApp }: PrivacyPolicyScreenProps) {
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="app-scroll-page min-h-screen bg-slate-50 flex flex-col pb-safe">
       <header className="sticky top-0 z-30 bg-blue-800 text-white shadow-sm">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -69,7 +69,7 @@ export function PrivacyPolicyScreen({ onBackToApp }: PrivacyPolicyScreenProps) {
                 <strong>My Orders</strong>.
               </li>
               <li>
-                <strong>Delivery Location (Address &amp; Optional GPS):</strong> Used
+                <strong>Delivery Location (Address &amp; GPS Coordinates):</strong> Used
                 strictly to verify the 3 km Tolichowki delivery radius and guide your
                 assigned rider to your doorstep.
               </li>
@@ -85,7 +85,7 @@ export function PrivacyPolicyScreen({ onBackToApp }: PrivacyPolicyScreenProps) {
               <strong>DailyDrop Water permanently deletes all completed customer order
               records and personal details weekly (every 7 days).</strong> Once orders are
               completed (Delivered or Rejected), all associated customer names, mobile
-              numbers, delivery addresses, GPS pins, and payment details are permanently
+              numbers, delivery addresses, GPS pins, and delivery proof photos are permanently
               purged from our order database during our weekly cleanup.
             </div>
             <p className="text-sm text-slate-700 leading-relaxed">

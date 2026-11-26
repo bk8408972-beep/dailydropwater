@@ -20,9 +20,9 @@ import {
   formatTimestamp,
   getNextRiderId,
   isSafeImageDataUrl,
-  sanitizePhoneForTel,
 } from '../../utils/domain';
 import { formatRelativeTime, isValidGeoPoint } from '../../utils/geo';
+import { triggerPhoneCall } from '../../utils/androidIntents';
 import { LiveFleetMap } from './LiveFleetMap';
 
 interface RidersTabProps {
@@ -248,7 +248,6 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {riders.map((rider) => {
               const hasSelfie = isSafeImageDataUrl(rider.lastSelfie);
-              const tel = sanitizePhoneForTel(rider.mobile);
 
               return (
                 <article
@@ -339,13 +338,14 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
                           <span>Focus Map</span>
                         </button>
                       )}
-                      <a
-                        href={`tel:${tel}`}
-                        className="min-h-[40px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5"
+                      <button
+                        type="button"
+                        onClick={() => triggerPhoneCall(rider.mobile, onNotify)}
+                        className="min-h-[40px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
                       >
                         <Phone className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
                         <span>Call</span>
-                      </a>
+                      </button>
 
                       <button
                         type="button"

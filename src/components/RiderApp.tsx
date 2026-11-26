@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Banknote,
   Bell,
   BellOff,
   Camera,
@@ -10,6 +11,7 @@ import {
   MapPin,
   Music,
   Navigation,
+  PackageCheck,
   Phone,
   Play,
   Power,
@@ -18,9 +20,10 @@ import {
   Truck,
   Upload,
   Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
-import type { Order, RiderRecord } from '../types';
+import type { CanonicalOrderStatus, Order, RiderRecord } from '../types';
 import {
   authenticateRider,
   dbPatch,
@@ -29,16 +32,32 @@ import {
 } from '../services/firebaseDb';
 import {
   buildGoogleMapsUrl,
+  COD_DISPLAY_LABEL,
   formatRupees,
   formatTimestamp,
   getStatusLabel,
+  isActiveOrderStatus,
   isSafeImageDataUrl,
-  sanitizePhoneForTel,
+  normalizeOrderStatus,
+  resolveOrderCustomerCoords,
 } from '../utils/domain';
+import {
+  getRiderAcceptanceCountdown,
+  isAwaitingRiderAcceptance,
+  shouldAutoUnassignOrder,
+} from '../utils/orderTimer';
 import { formatRelativeTime } from '../utils/geo';
+import {
+  buildMapsDirectionsUrl,
+  openExternalMapUrl,
+  triggerPhoneCall,
+  WATER_PLANT_LOCATION,
+} from '../utils/androidIntents';
+import { compressDeliveryPhotoFile } from '../utils/imageCompress';
 import {
   getCustomRingtoneInfo,
   installGlobalAudioUnlock,
+  playShortTestChime,
   resetCustomRingtone,
   saveCustomRingtoneFile,
   startRiderAlarmLoop,
@@ -48,6 +67,16 @@ import {
   type CustomRingtoneInfo,
 } from '../utils/sound';
 import { BrandLogo } from './BrandLogo';
+import { BackExitToast } from './BackExitToast';
+import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
+
+const RIDER_WORKFLOW_STEPS = [
+  { key: 'pending', short: '1. Accept' },
+  { key: 'accepted', short: '2. Plant' },
+  { key: 'reached_pickup', short: '3. Pickup' },
+  { key: 'out_for_delivery', short: '4. Photo' },
+  { key: 'delivered', short: '5. Cash' },
+] as const;
 
 export function RiderApp() {
   const [riderIdInput, setRiderIdInput] = useState('');
@@ -59,6 +88,12 @@ export function RiderApp() {
   const [rider, setRider] = useState<RiderRecord | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
+  const [uploadingPhotoOrderId, setUploadingPhotoOrderId] = useState<string | null>(
+    null
+  );
+  const [photoErrorByOrder, setPhotoErrorByOrder] = useState<Record<string, string>>(
+    {}
+  );
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   // Live Selfie Camera Modal
@@ -79,6 +114,7 @@ export function RiderApp() {
   const lastBroadcastMsRef = useRef<number>(0);
 
   // Loud delivery assignment alarm & custom ringtone state
+  const [soundEnabled, setSoundEnabled] = useState(true);
   const [acknowledgedOrderIds, setAcknowledgedOrderIds] = useState<string[]>([]);
   const [isRinging, setIsRinging] = useState(false);
   const [ringtoneInfo, setRingtoneInfo] = useState<CustomRingtoneInfo>(() =>
@@ -87,6 +123,10 @@ export function RiderApp() {
   const [ringtoneModalOpen, setRingtoneModalOpen] = useState(false);
   const [ringtoneFeedback, setRingtoneFeedback] = useState<string | null>(null);
   const [ringtoneError, setRingtoneError] = useState<string | null>(null);
+
+  // Live 1-second clock for 3-minute rider acceptance countdown & auto-unassign
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const timedOutAssignmentKeysRef = useRef<Set<string>>(new Set());
 
   const stopCameraStream = () => {
     if (streamRef.current) {
@@ -148,10 +188,98 @@ export function RiderApp() {
     };
   }, [sessionRiderId]);
 
-  // Continuously watch GPS and push /riders/{riderId}/liveLocation every 5 seconds while Duty ON
-  const isDutyOnline = Boolean(rider?.isOnline);
+  const activeDeliveries = useMemo(
+    () => orders.filter((o) => isActiveOrderStatus(o.status)),
+    [orders]
+  );
+
+  const outForDeliveryIds = useMemo(
+    () =>
+      orders
+        .filter((o) => normalizeOrderStatus(o.status) === 'out_for_delivery')
+        .map((o) => o.id),
+    [orders]
+  );
+  const outForDeliveryIdsRef = useRef<string[]>(outForDeliveryIds);
+  outForDeliveryIdsRef.current = outForDeliveryIds;
+
+  const completedDeliveries = useMemo(
+    () => orders.filter((o) => normalizeOrderStatus(o.status) === 'delivered'),
+    [orders]
+  );
+
+  const awaitingAcceptanceOrders = useMemo(
+    () =>
+      orders.filter(
+        (o) =>
+          o.assignedRiderId === sessionRiderId &&
+          isAwaitingRiderAcceptance(o)
+      ),
+    [orders, sessionRiderId]
+  );
+
+  const unacknowledgedAssignedOrders = useMemo(
+    () =>
+      awaitingAcceptanceOrders.filter(
+        (o) => !acknowledgedOrderIds.includes(o.id)
+      ),
+    [awaitingAcceptanceOrders, acknowledgedOrderIds]
+  );
+
+  // Tick every second while any assigned order is awaiting Step 1 acceptance
   useEffect(() => {
-    if (!sessionRiderId || !isDutyOnline) {
+    if (!sessionRiderId || awaitingAcceptanceOrders.length === 0) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [sessionRiderId, awaitingAcceptanceOrders.length]);
+
+  // Auto-unassign any assigned order whose 3-minute acceptance countdown hits 00:00
+  useEffect(() => {
+    if (!sessionRiderId || awaitingAcceptanceOrders.length === 0) return;
+    for (const order of awaitingAcceptanceOrders) {
+      if (!shouldAutoUnassignOrder(order, nowMs)) continue;
+      const assignmentKey = `${order.id}:${order.assignedAt ?? order.updatedAt ?? order.createdAt}`;
+      if (timedOutAssignmentKeysRef.current.has(assignmentKey)) continue;
+      timedOutAssignmentKeysRef.current.add(assignmentKey);
+
+      stopOrderAlertLoop();
+      setIsRinging(false);
+      const now = Date.now();
+      void dbPatch(`orders/${sanitizeFirebaseKey(order.id)}`, {
+        status: 'unassigned',
+        assignedRiderId: null,
+        assignedRiderName: null,
+        assignedRiderMobile: null,
+        assignedAt: null,
+        timedOutAt: now,
+        lastTimedOutRiderId: sessionRiderId,
+        lastTimedOutRiderName: rider?.name ?? sessionRiderId,
+        updatedAt: now,
+      })
+        .then(() => {
+          setActionMessage(
+            `Order ${order.id} timed out after 3 minutes and was returned to Owner for re-assignment.`
+          );
+        })
+        .catch(() => {
+          timedOutAssignmentKeysRef.current.delete(assignmentKey);
+        });
+    }
+  }, [sessionRiderId, awaitingAcceptanceOrders, nowMs, rider?.name]);
+
+  // Continuously watch GPS and push /riders/{riderId}/liveLocation AND /orders/{orderId} (riderLat/riderLng)
+  // every 5 seconds while Duty ON or while any order is out_for_delivery
+  const isDutyOnline = Boolean(rider?.isOnline);
+  const hasOutForDeliveryOrders = outForDeliveryIds.length > 0;
+  const shouldTrackGps = Boolean(
+    sessionRiderId && (isDutyOnline || hasOutForDeliveryOrders)
+  );
+
+  useEffect(() => {
+    if (!shouldTrackGps || !sessionRiderId) {
       setGpsStatus('idle');
       setGpsError(null);
       latestCoordsRef.current = null;
@@ -171,14 +299,36 @@ export function RiderApp() {
       if (!active) return;
       const now = Date.now();
       lastBroadcastMsRef.current = now;
+      const fixedLat = Number(lat.toFixed(6));
+      const fixedLng = Number(lng.toFixed(6));
+
       try {
-        await dbPatch(`riders/${safeRiderId}`, {
-          liveLocation: {
-            lat: Number(lat.toFixed(6)),
-            lng: Number(lng.toFixed(6)),
-            updatedAt: now,
-          },
-        });
+        const tasks: Promise<unknown>[] = [];
+        if (isDutyOnline) {
+          tasks.push(
+            dbPatch(`riders/${safeRiderId}`, {
+              liveLocation: {
+                lat: fixedLat,
+                lng: fixedLng,
+                updatedAt: now,
+              },
+            })
+          );
+        }
+        for (const orderId of outForDeliveryIdsRef.current) {
+          const safeOrderId = sanitizeFirebaseKey(orderId);
+          if (safeOrderId) {
+            tasks.push(
+              dbPatch(`orders/${safeOrderId}`, {
+                riderLat: fixedLat,
+                riderLng: fixedLng,
+                riderLocationUpdatedAt: now,
+                updatedAt: now,
+              })
+            );
+          }
+        }
+        await Promise.all(tasks);
         if (active) {
           setGpsStatus('active');
           setGpsError(null);
@@ -226,45 +376,18 @@ export function RiderApp() {
       navigator.geolocation.clearWatch(watchId);
       window.clearInterval(intervalId);
     };
-  }, [sessionRiderId, isDutyOnline]);
+  }, [sessionRiderId, isDutyOnline, shouldTrackGps]);
 
-  const activeDeliveries = useMemo(
-    () =>
-      orders.filter(
-        (o) =>
-          o.status === 'PENDING' ||
-          o.status === 'ACCEPTED' ||
-          o.status === 'OUT_FOR_DELIVERY'
-      ),
-    [orders]
-  );
-
-  const completedDeliveries = useMemo(
-    () => orders.filter((o) => o.status === 'DELIVERED'),
-    [orders]
-  );
-
-  const unacknowledgedAcceptedOrders = useMemo(
-    () =>
-      orders.filter(
-        (o) =>
-          o.assignedRiderId === sessionRiderId &&
-          o.status === 'ACCEPTED' &&
-          !acknowledgedOrderIds.includes(o.id)
-      ),
-    [orders, sessionRiderId, acknowledgedOrderIds]
-  );
-
-  // Continuously ring Zomato-style delivery siren + vibration every 2s for assigned ACCEPTED orders
+  // Continuously ring original DailyDrop dual-tone delivery chime + vibration for newly assigned orders
   useEffect(() => {
-    if (sessionRiderId && unacknowledgedAcceptedOrders.length > 0) {
+    if (sessionRiderId && soundEnabled && unacknowledgedAssignedOrders.length > 0) {
       startRiderAlarmLoop();
       setIsRinging(true);
     } else {
       stopOrderAlertLoop();
       setIsRinging(false);
     }
-  }, [sessionRiderId, unacknowledgedAcceptedOrders.length]);
+  }, [sessionRiderId, soundEnabled, unacknowledgedAssignedOrders.length]);
 
   const handleAcknowledgeOrders = (orderIds: string[]) => {
     if (orderIds.length === 0) return;
@@ -276,9 +399,30 @@ export function RiderApp() {
     });
     setActionMessage(
       orderIds.length === 1
-        ? `Acknowledged order ${orderIds[0]}. Tap Start Delivery when heading out.`
-        : `Acknowledged ${orderIds.length} assigned orders.`
+        ? `Alert muted for order ${orderIds[0]}. Tap Step 1: Accept Order before the 3-minute timer expires.`
+        : `Alert muted for ${orderIds.length} assigned orders.`
     );
+  };
+
+  const handleAlertSoundOnButton = () => {
+    setRingtoneError(null);
+    unlockAudioContext();
+    setSoundEnabled(true);
+    playShortTestChime('rider');
+    setActionMessage(
+      'Order Alert Sound is ON — audio unlocked for incoming delivery alerts.'
+    );
+  };
+
+  const handleMuteAlertButton = () => {
+    if (unacknowledgedAssignedOrders.length > 0) {
+      handleAcknowledgeOrders(unacknowledgedAssignedOrders.map((o) => o.id));
+    } else {
+      stopOrderAlertLoop();
+      setIsRinging(false);
+      setSoundEnabled(false);
+      setActionMessage('Order alert sound muted. Tap "Order Alert Sound: ON" to re-enable.');
+    }
   };
 
   const handleTestRiderSound = () => {
@@ -473,33 +617,61 @@ export function RiderApp() {
     }
   };
 
-  const handleUpdateOrderStatus = async (
+  const handleUpdateOrderStep = async (
     order: Order,
-    nextStatus: 'OUT_FOR_DELIVERY' | 'DELIVERED'
+    nextStatus: Extract<
+      CanonicalOrderStatus,
+      'accepted' | 'reached_pickup' | 'out_for_delivery' | 'delivered'
+    >
   ) => {
+    if (nextStatus === 'delivered' && !isSafeImageDataUrl(order.deliveryPhoto)) {
+      setPhotoErrorByOrder((prev) => ({
+        ...prev,
+        [order.id]: 'Take a doorstep delivery photo first before marking as delivered.',
+      }));
+      return;
+    }
+
     setUpdatingOrderId(order.id);
-    if (nextStatus === 'OUT_FOR_DELIVERY') {
+    if (nextStatus === 'accepted') {
       stopOrderAlertLoop();
       setIsRinging(false);
       setAcknowledgedOrderIds((prev) =>
         prev.includes(order.id) ? prev : [...prev, order.id]
       );
     }
+
     try {
       const now = Date.now();
       const patch: Record<string, unknown> = {
         status: nextStatus,
         updatedAt: now,
       };
-      if (nextStatus === 'DELIVERED') {
+      if (nextStatus === 'accepted') {
+        patch.riderAcceptedAt = now;
+      } else if (nextStatus === 'reached_pickup') {
+        patch.reachedPickupAt = now;
+      } else if (nextStatus === 'out_for_delivery') {
+        patch.pickedUpAt = now;
+        const coords = latestCoordsRef.current ?? rider?.liveLocation ?? null;
+        if (coords) {
+          patch.riderLat = Number(coords.lat.toFixed(6));
+          patch.riderLng = Number(coords.lng.toFixed(6));
+          patch.riderLocationUpdatedAt = now;
+        }
+      } else if (nextStatus === 'delivered') {
         patch.deliveredAt = now;
       }
+
       await dbPatch(`orders/${sanitizeFirebaseKey(order.id)}`, patch);
-      setActionMessage(
-        nextStatus === 'DELIVERED'
-          ? `Order ${order.id} marked Delivered.`
-          : `Order ${order.id} is now Out for Delivery.`
-      );
+
+      const stepMessages: Record<typeof nextStatus, string> = {
+        accepted: `Order ${order.id} accepted! Navigate to the Water Plant for pickup.`,
+        reached_pickup: `Marked Reached Pickup Location for ${order.id}. Load items and tap Picked Up.`,
+        out_for_delivery: `Order ${order.id} is Out for Delivery! Live GPS tracking started for customer.`,
+        delivered: `Order ${order.id} Delivered! Cash collected (${formatRupees(order.totalAmount)}).`,
+      };
+      setActionMessage(stepMessages[nextStatus]);
     } catch (err) {
       setActionMessage(
         err instanceof Error ? err.message : 'Failed to update order status.'
@@ -509,10 +681,60 @@ export function RiderApp() {
     }
   };
 
+  const handleCaptureDeliveryPhoto = async (
+    order: Order,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setUploadingPhotoOrderId(order.id);
+    setPhotoErrorByOrder((prev) => {
+      const next = { ...prev };
+      delete next[order.id];
+      return next;
+    });
+
+    try {
+      const compressed = await compressDeliveryPhotoFile(file);
+      await dbPatch(`orders/${sanitizeFirebaseKey(order.id)}`, {
+        deliveryPhoto: compressed.dataUrl,
+        updatedAt: Date.now(),
+      });
+      setActionMessage(
+        `Delivery photo saved for ${order.id} (${compressed.sizeKb} KB). You can now collect ${formatRupees(order.totalAmount)} cash and mark as Delivered.`
+      );
+    } catch (err) {
+      setPhotoErrorByOrder((prev) => ({
+        ...prev,
+        [order.id]:
+          err instanceof Error
+            ? err.message
+            : 'Could not save delivery photo. Please retake.',
+      }));
+    } finally {
+      setUploadingPhotoOrderId(null);
+    }
+  };
+
+  // Prevent accidental app exit on Android hardware/gesture Back button
+  const { exitPromptVisible } = useAndroidBackGuard({
+    scope: 'rider',
+    hasOpenOverlay: Boolean(selfieModalOpen || ringtoneModalOpen),
+    onCloseOverlay: () => {
+      if (selfieModalOpen) {
+        handleCloseSelfieModal();
+      } else if (ringtoneModalOpen) {
+        setRingtoneModalOpen(false);
+      }
+    },
+  });
+
   // RIDER LOGIN SCREEN
   if (!sessionRiderId || !rider) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col">
+      <div className="app-scroll-page min-h-screen bg-slate-50 flex flex-col pb-safe">
         <header className="bg-blue-800 text-white px-4 sm:px-6 py-5">
           <div className="max-w-md mx-auto flex items-center gap-3">
             <BrandLogo size="md" />
@@ -596,12 +818,13 @@ export function RiderApp() {
             </form>
           </div>
         </main>
+        <BackExitToast visible={exitPromptVisible} />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-12">
+    <div className="app-scroll-page bg-slate-50 pb-safe-page">
       {/* Rider Sticky Top Bar */}
       <header className="sticky top-0 z-30 bg-blue-800 text-white shadow-sm">
         <div className="max-w-5xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-2">
@@ -662,8 +885,42 @@ export function RiderApp() {
         </div>
       </header>
 
+      {/* Clear Top Audio Unlock Bar ("Order Alert Sound: ON" + "Mute Alert") */}
+      <div className="bg-blue-950 text-white border-b border-blue-900">
+        <div className="max-w-5xl mx-auto px-3 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={handleAlertSoundOnButton}
+            data-testid="rider-alert-sound-btn"
+            className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors ${
+              soundEnabled
+                ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                : 'bg-slate-700 hover:bg-slate-600 text-white'
+            }`}
+          >
+            {soundEnabled ? (
+              <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+            ) : (
+              <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
+            )}
+            <span>
+              {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleMuteAlertButton}
+            className="min-h-[38px] px-3 rounded-xl bg-blue-900 hover:bg-blue-800 border border-blue-700 text-cyan-100 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <BellOff className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            <span>Mute Alert</span>
+          </button>
+        </div>
+      </div>
+
       {/* Loud New Delivery Assignment Alert Banner */}
-      {isRinging && unacknowledgedAcceptedOrders.length > 0 && (
+      {isRinging && unacknowledgedAssignedOrders.length > 0 && (
         <div
           role="alert"
           className="bg-amber-500 text-slate-950 border-b border-amber-600 shadow-sm"
@@ -673,21 +930,21 @@ export function RiderApp() {
               <Bell className="w-5 h-5 shrink-0" aria-hidden="true" />
               <span>
                 New Delivery Assigned! Ringing ({ringtoneInfo.name}) ·{' '}
-                {unacknowledgedAcceptedOrders.length}{' '}
-                {unacknowledgedAcceptedOrders.length === 1 ? 'order' : 'orders'} waiting
+                {unacknowledgedAssignedOrders.length}{' '}
+                {unacknowledgedAssignedOrders.length === 1 ? 'order' : 'orders'} waiting
               </span>
             </div>
             <button
               type="button"
               onClick={() =>
                 handleAcknowledgeOrders(
-                  unacknowledgedAcceptedOrders.map((o) => o.id)
+                  unacknowledgedAssignedOrders.map((o) => o.id)
                 )
               }
               className="min-h-[40px] px-4 rounded-xl bg-slate-950 hover:bg-slate-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
             >
               <BellOff className="w-4 h-4" aria-hidden="true" />
-              <span>Acknowledge Order</span>
+              <span>Mute Alert</span>
             </button>
           </div>
         </div>
@@ -828,13 +1085,41 @@ export function RiderApp() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {activeDeliveries.map((order) => {
-                const customerTel = sanitizePhoneForTel(order.customerMobile);
-                const mapsUrl = buildGoogleMapsUrl(order.address);
+                const canonicalStatus = normalizeOrderStatus(order.status);
                 const busy = updatingOrderId === order.id;
+                const uploadingPhoto = uploadingPhotoOrderId === order.id;
+                const hasDeliveryPhoto = isSafeImageDataUrl(order.deliveryPhoto);
+                const customerCoords = resolveOrderCustomerCoords(order);
+                const plantNavUrl = buildMapsDirectionsUrl(
+                  WATER_PLANT_LOCATION.lat,
+                  WATER_PLANT_LOCATION.lng
+                );
+                const customerNavUrl = customerCoords
+                  ? buildMapsDirectionsUrl(customerCoords.lat, customerCoords.lng)
+                  : buildGoogleMapsUrl(order.address);
+
+                const awaitingAcceptance = isAwaitingRiderAcceptance(order);
+                const acceptanceTimer = awaitingAcceptance
+                  ? getRiderAcceptanceCountdown(order, nowMs)
+                  : null;
+
+                const currentStepIndex =
+                  awaitingAcceptance || canonicalStatus === 'pending' || canonicalStatus === 'assigned'
+                    ? 0
+                    : canonicalStatus === 'accepted'
+                      ? 1
+                      : canonicalStatus === 'reached_pickup'
+                        ? 2
+                        : canonicalStatus === 'out_for_delivery'
+                          ? hasDeliveryPhoto
+                            ? 4
+                            : 3
+                          : 4;
 
                 return (
                   <article
                     key={order.id}
+                    data-testid={`rider-order-${order.id}`}
                     className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col justify-between gap-4"
                   >
                     <div>
@@ -846,13 +1131,61 @@ export function RiderApp() {
                           <h3 className="font-display text-lg font-bold text-slate-900 mt-0.5">
                             {order.customerName}
                           </h3>
-                          <p className="text-xs font-semibold text-blue-700 mt-0.5">
-                            {getStatusLabel(order.status)} · {order.paymentMethod}
+                          <p className="text-xs font-bold text-blue-700 mt-0.5">
+                            {getStatusLabel(order.status)}
                           </p>
                         </div>
-                        <div className="font-display text-xl font-extrabold text-slate-900 tabular-nums">
-                          {formatRupees(order.totalAmount)}
+                        <div className="text-right">
+                          <div className="font-display text-xl font-extrabold text-slate-900 tabular-nums">
+                            {formatRupees(order.totalAmount)}
+                          </div>
+                          <span className="text-[11px] font-bold text-emerald-700">
+                            COD Cash
+                          </span>
                         </div>
+                      </div>
+
+                      {/* 5-Stage Progress Indicator */}
+                      <div className="grid grid-cols-5 gap-1 py-3 border-b border-slate-100">
+                        {RIDER_WORKFLOW_STEPS.map((st, idx) => {
+                          const done = idx < currentStepIndex;
+                          const active = idx === currentStepIndex;
+                          return (
+                            <div key={st.key} className="text-center">
+                              <div
+                                className={`h-1.5 rounded-full mb-1 ${
+                                  done
+                                    ? 'bg-emerald-600'
+                                    : active
+                                      ? 'bg-blue-700'
+                                      : 'bg-slate-200'
+                                }`}
+                              />
+                              <span
+                                className={`text-[10px] font-bold block leading-tight ${
+                                  active
+                                    ? 'text-blue-700'
+                                    : done
+                                      ? 'text-emerald-700'
+                                      : 'text-slate-400'
+                                }`}
+                              >
+                                {st.short}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* COD Cash Banner */}
+                      <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 flex items-center justify-between gap-2 text-xs">
+                        <span className="font-bold text-emerald-900 flex items-center gap-1.5">
+                          <Banknote className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />
+                          <span>{COD_DISPLAY_LABEL}</span>
+                        </span>
+                        <span className="font-display font-extrabold text-emerald-900 text-sm tabular-nums shrink-0">
+                          Collect {formatRupees(order.totalAmount)}
+                        </span>
                       </div>
 
                       <div className="py-3 space-y-2 text-sm text-slate-700">
@@ -883,69 +1216,254 @@ export function RiderApp() {
                       </div>
                     </div>
 
+                    {/* Step-by-Step Controls */}
                     <div className="space-y-2.5 pt-2 border-t border-slate-100">
-                      <div className="grid grid-cols-2 gap-2.5">
-                        <a
-                          href={`tel:${customerTel}`}
-                          className="min-h-[46px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 font-semibold text-sm flex items-center justify-center gap-2 transition-colors"
-                        >
-                          <Phone className="w-4 h-4 text-blue-700" aria-hidden="true" />
-                          <span>Call Customer</span>
-                        </a>
+                      {/* Call Customer button (Android Telecom Intent + Copy fallback) */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          triggerPhoneCall(order.customerMobile, setActionMessage)
+                        }
+                        className="w-full min-h-[46px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 font-semibold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                      >
+                        <Phone className="w-4 h-4 text-blue-700" aria-hidden="true" />
+                        <span>Call Customer ({order.customerMobile})</span>
+                      </button>
 
-                        <a
-                          href={mapsUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 text-cyan-950 font-semibold text-sm flex items-center justify-center gap-2 transition-colors"
-                        >
-                          <Navigation className="w-4 h-4 text-cyan-700" aria-hidden="true" />
-                          <span>Open Maps</span>
-                        </a>
-                      </div>
+                      {/* STEP 1: Accept Order + 3-Minute Acceptance Countdown */}
+                      {awaitingAcceptance && (
+                        <div className="space-y-2.5">
+                          {acceptanceTimer && (
+                            <div
+                              data-testid={`rider-timer-${order.id}`}
+                              className={`rounded-xl border p-3 ${
+                                acceptanceTimer.isUrgent
+                                  ? 'bg-red-50 border-red-300 text-red-900'
+                                  : 'bg-amber-50 border-amber-300 text-amber-950'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2 text-xs font-extrabold">
+                                <span className="flex items-center gap-1.5">
+                                  <Clock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                                  <span>Accept within 3 minutes</span>
+                                </span>
+                                <span className="font-mono text-sm tabular-nums">
+                                  {acceptanceTimer.formatted}
+                                </span>
+                              </div>
+                              <div className="mt-2 h-2 w-full rounded-full bg-white/80 overflow-hidden border border-black/5">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-700 ${
+                                    acceptanceTimer.isUrgent ? 'bg-red-600' : 'bg-amber-500'
+                                  }`}
+                                  style={{ width: `${acceptanceTimer.progressPercent}%` }}
+                                />
+                              </div>
+                            </div>
+                          )}
 
-                      {order.status !== 'OUT_FOR_DELIVERY' ? (
-                        <div className="space-y-2">
                           <button
                             type="button"
                             disabled={busy}
                             onClick={() =>
-                              handleUpdateOrderStatus(order, 'OUT_FOR_DELIVERY')
+                              void handleUpdateOrderStep(order, 'accepted')
                             }
-                            className="w-full min-h-[50px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
+                            className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
+                          >
+                            <CheckCircle2 className="w-5 h-5 shrink-0" aria-hidden="true" />
+                            <span>{busy ? 'Accepting…' : 'Step 1: Accept Order'}</span>
+                          </button>
+
+                          {!acknowledgedOrderIds.includes(order.id) && (
+                            <button
+                              type="button"
+                              onClick={() => handleAcknowledgeOrders([order.id])}
+                              className="w-full min-h-[42px] rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                            >
+                              <BellOff className="w-4 h-4 shrink-0" aria-hidden="true" />
+                              <span>Mute Alert</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {/* STEP 2: Navigate to Plant / Pickup Location -> Reached Pickup Location */}
+                      {canonicalStatus === 'accepted' && (
+                        <div className="space-y-2.5">
+                          <button
+                            type="button"
+                            onClick={() => openExternalMapUrl(plantNavUrl)}
+                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          >
+                            <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                            <span>Navigate to Plant / Pickup Location</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              void handleUpdateOrderStep(order, 'reached_pickup')
+                            }
+                            className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
+                          >
+                            <MapPin className="w-5 h-5 shrink-0" aria-hidden="true" />
+                            <span>
+                              {busy ? 'Updating…' : 'Step 2: Reached Pickup Location'}
+                            </span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* STEP 3: Order Picked Up / Out for Delivery */}
+                      {canonicalStatus === 'reached_pickup' && (
+                        <div className="space-y-2.5">
+                          <button
+                            type="button"
+                            onClick={() => openExternalMapUrl(plantNavUrl)}
+                            className="w-full min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          >
+                            <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                            <span>Navigate to Plant / Pickup Location</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              void handleUpdateOrderStep(order, 'out_for_delivery')
+                            }
+                            className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
                           >
                             <Truck className="w-5 h-5 shrink-0" aria-hidden="true" />
                             <span>
                               {busy
-                                ? 'Updating…'
-                                : 'Start Delivery / Out for Delivery'}
+                                ? 'Starting Delivery…'
+                                : 'Step 3: Order Picked Up / Out for Delivery'}
+                            </span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* STEP 4 & STEP 5: Navigate to Customer -> Take Delivery Photo -> Mark as Delivered (Cash Collected) */}
+                      {canonicalStatus === 'out_for_delivery' && (
+                        <div className="space-y-3">
+                          <button
+                            type="button"
+                            onClick={() => openExternalMapUrl(customerNavUrl)}
+                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          >
+                            <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                            <span>Navigate to Customer Location</span>
+                          </button>
+
+                          <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-900 flex items-center gap-2">
+                            <PackageCheck className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
+                            <span>
+                              Live GPS tracking active for customer · Collect{' '}
+                              <strong className="tabular-nums">
+                                {formatRupees(order.totalAmount)}
+                              </strong>{' '}
+                              cash at doorstep
+                            </span>
+                          </div>
+
+                          {/* Step 4: Mandatory Delivery Photo Proof */}
+                          <div
+                            className={`rounded-xl border p-3 space-y-2.5 ${
+                              hasDeliveryPhoto
+                                ? 'bg-emerald-50 border-emerald-300'
+                                : 'bg-amber-50 border-amber-300'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className={`text-xs font-bold flex items-center gap-1.5 ${
+                                  hasDeliveryPhoto
+                                    ? 'text-emerald-900'
+                                    : 'text-amber-950'
+                                }`}
+                              >
+                                <Camera className="w-4 h-4 shrink-0" aria-hidden="true" />
+                                <span>
+                                  {hasDeliveryPhoto
+                                    ? 'Step 4 Complete: Delivery Photo Saved'
+                                    : 'Step 4 (Required): Take Delivery Photo'}
+                                </span>
+                              </span>
+                            </div>
+
+                            {hasDeliveryPhoto && (
+                              <div className="overflow-hidden rounded-xl border border-emerald-300 bg-white">
+                                <img
+                                  src={order.deliveryPhoto!}
+                                  alt={`Doorstep delivery proof for ${order.id}`}
+                                  className="w-full h-40 object-cover"
+                                />
+                              </div>
+                            )}
+
+                            <label
+                              className={`w-full min-h-[46px] px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-colors ${
+                                hasDeliveryPhoto
+                                  ? 'bg-white border border-emerald-400 text-emerald-900 hover:bg-emerald-100'
+                                  : 'bg-slate-900 hover:bg-slate-800 text-white'
+                              }`}
+                            >
+                              <Camera className="w-4 h-4 shrink-0" aria-hidden="true" />
+                              <span>
+                                {uploadingPhoto
+                                  ? 'Compressing & Saving Photo…'
+                                  : hasDeliveryPhoto
+                                    ? 'Retake Delivery Photo'
+                                    : 'Take Delivery Photo'}
+                              </span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                disabled={uploadingPhoto}
+                                onChange={(e) =>
+                                  void handleCaptureDeliveryPhoto(order, e)
+                                }
+                                className="sr-only"
+                              />
+                            </label>
+
+                            {photoErrorByOrder[order.id] && (
+                              <p
+                                role="alert"
+                                className="text-xs font-semibold text-red-700"
+                              >
+                                {photoErrorByOrder[order.id]}
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Step 5: Mark as Delivered (Cash Collected) — strictly disabled until deliveryPhoto exists */}
+                          <button
+                            type="button"
+                            disabled={busy || !hasDeliveryPhoto}
+                            onClick={() =>
+                              void handleUpdateOrderStep(order, 'delivered')
+                            }
+                            className="w-full min-h-[54px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            <CheckCircle2 className="w-5 h-5 shrink-0" aria-hidden="true" />
+                            <span>
+                              {busy
+                                ? 'Completing Delivery…'
+                                : `Mark as Delivered (Cash Collected · ${formatRupees(order.totalAmount)})`}
                             </span>
                           </button>
 
-                          {order.status === 'ACCEPTED' &&
-                            !acknowledgedOrderIds.includes(order.id) && (
-                              <button
-                                type="button"
-                                onClick={() => handleAcknowledgeOrders([order.id])}
-                                className="w-full min-h-[44px] rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                              >
-                                <BellOff className="w-4 h-4 shrink-0" aria-hidden="true" />
-                                <span>Acknowledge Order (Silence Alert)</span>
-                              </button>
-                            )}
+                          {!hasDeliveryPhoto && (
+                            <p className="text-[11px] font-semibold text-amber-800 text-center">
+                              Capture the doorstep delivery photo above to unlock Mark as
+                              Delivered.
+                            </p>
+                          )}
                         </div>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() =>
-                            handleUpdateOrderStatus(order, 'DELIVERED')
-                          }
-                          className="w-full min-h-[50px] rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-bold text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
-                        >
-                          <CheckCircle2 className="w-5 h-5" aria-hidden="true" />
-                          <span>{busy ? 'Completing…' : 'Mark Delivered'}</span>
-                        </button>
                       )}
                     </div>
                   </article>
@@ -994,7 +1512,7 @@ export function RiderApp() {
           aria-modal="true"
           aria-labelledby="selfie-modal-title"
         >
-          <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-xl">
+          <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto scroll-touch shadow-xl pb-safe">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <div>
                 <h2
@@ -1094,7 +1612,7 @@ export function RiderApp() {
           aria-modal="true"
           aria-labelledby="rider-ringtone-title"
         >
-          <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-xl">
+          <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto scroll-touch shadow-xl pb-safe">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <h2
                 id="rider-ringtone-title"
@@ -1177,6 +1695,8 @@ export function RiderApp() {
           </div>
         </div>
       )}
+
+      <BackExitToast visible={exitPromptVisible} />
     </div>
   );
 }

@@ -7,7 +7,9 @@ export interface CompressedImageResult {
 }
 
 const MAX_DIMENSION = 300;
-const MAX_TARGET_BYTES = 50 * 1024; // 50 KB cap
+const MAX_TARGET_BYTES = 50 * 1024; // 50 KB cap for product catalog thumbnails
+const DELIVERY_PHOTO_MAX_DIMENSION = 720;
+const DELIVERY_PHOTO_MAX_BYTES = 145 * 1024; // Strictly under 150 KB for Firebase RTDB
 
 export function estimateDataUrlBytes(dataUrl: string): number {
   const commaIdx = dataUrl.indexOf(',');
@@ -16,12 +18,12 @@ export function estimateDataUrlBytes(dataUrl: string): number {
   return Math.ceil((base64.length * 3) / 4);
 }
 
-/**
- * Compresses an uploaded gallery photo via HTML5 Canvas to max 300x300px,
- * JPEG quality 0.7 (stepping down automatically if needed to guarantee < 50 KB).
- */
-export async function compressProductImageFile(
-  file: File
+async function compressImageWithCap(
+  file: File,
+  startMaxDim: number,
+  fallbackMaxDim: number,
+  maxBytes: number,
+  qualities: number[]
 ): Promise<CompressedImageResult> {
   if (!file.type.startsWith('image/')) {
     throw new Error('Please choose a valid image file (JPG, PNG, or WebP).');
@@ -36,7 +38,7 @@ export async function compressProductImageFile(
         reject(new Error('Could not read the selected photo.'));
       }
     };
-    reader.onerror = () => reject(new Error('Failed to read photo from gallery.'));
+    reader.onerror = () => reject(new Error('Failed to read photo.'));
     reader.readAsDataURL(file);
   });
 
@@ -47,15 +49,14 @@ export async function compressProductImageFile(
     element.src = rawDataUrl;
   });
 
-  let maxDim = MAX_DIMENSION;
-  const qualities = [0.7, 0.58, 0.46, 0.35];
+  const dimensions = [startMaxDim, fallbackMaxDim, Math.round(fallbackMaxDim * 0.7)];
 
   let bestDataUrl = '';
   let bestWidth = 0;
   let bestHeight = 0;
   let bestBytes = Infinity;
 
-  for (let pass = 0; pass < 2; pass++) {
+  for (const maxDim of dimensions) {
     const scale = Math.min(
       1,
       maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1)
@@ -79,11 +80,13 @@ export async function compressProductImageFile(
     for (const quality of qualities) {
       const candidate = canvas.toDataURL('image/jpeg', quality);
       const bytes = estimateDataUrlBytes(candidate);
-      bestDataUrl = candidate;
-      bestWidth = width;
-      bestHeight = height;
-      bestBytes = bytes;
-      if (bytes <= MAX_TARGET_BYTES) {
+      if (bytes < bestBytes) {
+        bestDataUrl = candidate;
+        bestWidth = width;
+        bestHeight = height;
+        bestBytes = bytes;
+      }
+      if (bytes <= maxBytes) {
         return {
           dataUrl: candidate,
           sizeBytes: bytes,
@@ -93,8 +96,6 @@ export async function compressProductImageFile(
         };
       }
     }
-
-    maxDim = 220;
   }
 
   return {
@@ -104,4 +105,36 @@ export async function compressProductImageFile(
     width: bestWidth,
     height: bestHeight,
   };
+}
+
+/**
+ * Compresses an uploaded gallery photo via HTML5 Canvas to max 300x300px,
+ * JPEG quality 0.7 (stepping down automatically if needed to guarantee < 50 KB).
+ */
+export async function compressProductImageFile(
+  file: File
+): Promise<CompressedImageResult> {
+  return compressImageWithCap(
+    file,
+    MAX_DIMENSION,
+    220,
+    MAX_TARGET_BYTES,
+    [0.7, 0.58, 0.46, 0.35]
+  );
+}
+
+/**
+ * Compresses a Rider doorstep delivery proof photo via HTML5 Canvas to a
+ * lightweight JPEG Base64 data URL strictly under 150 KB for Firebase RTDB.
+ */
+export async function compressDeliveryPhotoFile(
+  file: File
+): Promise<CompressedImageResult> {
+  return compressImageWithCap(
+    file,
+    DELIVERY_PHOTO_MAX_DIMENSION,
+    520,
+    DELIVERY_PHOTO_MAX_BYTES,
+    [0.74, 0.62, 0.5, 0.38, 0.28]
+  );
 }

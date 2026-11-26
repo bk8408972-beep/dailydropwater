@@ -4,11 +4,27 @@ export type ProductCategory = 'Water Cans' | 'Water Bottles' | 'Cold Drinks';
 
 export type ServiceMode = 'fast' | 'events';
 
-export type PaymentMethod = 'Cash on Delivery' | 'UPI on Delivery';
+export type PaymentMethod = 'Cash on Delivery';
+
+export type CanonicalOrderStatus =
+  | 'pending'
+  | 'assigned'
+  | 'unassigned'
+  | 'accepted'
+  | 'reached_pickup'
+  | 'out_for_delivery'
+  | 'delivered'
+  | 'rejected';
 
 export type OrderStatus =
+  | CanonicalOrderStatus
+  | 'placed'
+  | 'PLACED'
   | 'PENDING'
+  | 'ASSIGNED'
+  | 'UNASSIGNED'
   | 'ACCEPTED'
+  | 'REACHED_PICKUP'
   | 'OUT_FOR_DELIVERY'
   | 'DELIVERED'
   | 'REJECTED';
@@ -53,11 +69,24 @@ export interface Order {
   customerName: string;
   customerMobile: string;
   address: string;
+  customerLat?: number | null;
+  customerLng?: number | null;
   customerLocation?: GeoPoint | null;
+  riderLat?: number | null;
+  riderLng?: number | null;
+  riderLocationUpdatedAt?: number | null;
+  deliveryPhoto?: string | null;
+  ownerApproved?: boolean;
+  assignedAt?: number | null;
+  timedOutAt?: number | null;
+  lastTimedOutRiderId?: string | null;
+  lastTimedOutRiderName?: string | null;
+  riderAcceptedAt?: number | null;
+  reachedPickupAt?: number | null;
+  pickedUpAt?: number | null;
   serviceMode: ServiceMode;
   eventDetails?: EventDetails | null;
-  paymentMethod: PaymentMethod;
-  paymentStatus?: 'PENDING' | 'SUCCESSFUL';
+  paymentMethod: PaymentMethod | string;
   items: OrderItem[];
   totalAmount: number;
   status: OrderStatus;

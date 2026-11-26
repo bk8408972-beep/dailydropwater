@@ -1,5 +1,7 @@
 import type {
   AppRole,
+  CanonicalOrderStatus,
+  GeoPoint,
   Order,
   OrderStatus,
   Product,
@@ -7,6 +9,101 @@ import type {
   RiderRecord,
   ServiceMode,
 } from '../types';
+
+export const COD_DISPLAY_LABEL = 'Cash on Delivery (Pay Cash to Rider)';
+
+export function normalizeOrderStatus(status?: string | null): CanonicalOrderStatus {
+  const normalized = (status ?? '').trim().toLowerCase();
+  switch (normalized) {
+    case 'placed':
+    case 'pending':
+      return 'pending';
+    case 'assigned':
+      return 'assigned';
+    case 'unassigned':
+      return 'unassigned';
+    case 'accepted':
+      return 'accepted';
+    case 'reached_pickup':
+      return 'reached_pickup';
+    case 'out_for_delivery':
+      return 'out_for_delivery';
+    case 'delivered':
+      return 'delivered';
+    case 'rejected':
+      return 'rejected';
+    default:
+      return 'pending';
+  }
+}
+
+export function isActiveOrderStatus(status?: string | null): boolean {
+  const s = normalizeOrderStatus(status);
+  return (
+    s === 'pending' ||
+    s === 'assigned' ||
+    s === 'unassigned' ||
+    s === 'accepted' ||
+    s === 'reached_pickup' ||
+    s === 'out_for_delivery'
+  );
+}
+
+export function resolveOrderCustomerCoords(order: Order): GeoPoint | null {
+  if (
+    typeof order.customerLat === 'number' &&
+    typeof order.customerLng === 'number' &&
+    Number.isFinite(order.customerLat) &&
+    Number.isFinite(order.customerLng)
+  ) {
+    return { lat: order.customerLat, lng: order.customerLng };
+  }
+  if (
+    order.customerLocation &&
+    typeof order.customerLocation.lat === 'number' &&
+    typeof order.customerLocation.lng === 'number' &&
+    Number.isFinite(order.customerLocation.lat) &&
+    Number.isFinite(order.customerLocation.lng)
+  ) {
+    return {
+      lat: order.customerLocation.lat,
+      lng: order.customerLocation.lng,
+    };
+  }
+  return null;
+}
+
+export function resolveOrderRiderCoords(
+  order: Order,
+  fallbackRiderLocation?: { lat: number; lng: number; updatedAt?: number } | null
+): { lat: number; lng: number; updatedAt: number } | null {
+  if (
+    typeof order.riderLat === 'number' &&
+    typeof order.riderLng === 'number' &&
+    Number.isFinite(order.riderLat) &&
+    Number.isFinite(order.riderLng)
+  ) {
+    return {
+      lat: order.riderLat,
+      lng: order.riderLng,
+      updatedAt: order.riderLocationUpdatedAt ?? order.updatedAt ?? Date.now(),
+    };
+  }
+  if (
+    fallbackRiderLocation &&
+    typeof fallbackRiderLocation.lat === 'number' &&
+    typeof fallbackRiderLocation.lng === 'number' &&
+    Number.isFinite(fallbackRiderLocation.lat) &&
+    Number.isFinite(fallbackRiderLocation.lng)
+  ) {
+    return {
+      lat: fallbackRiderLocation.lat,
+      lng: fallbackRiderLocation.lng,
+      updatedAt: fallbackRiderLocation.updatedAt ?? Date.now(),
+    };
+  }
+  return null;
+}
 
 export const PRODUCT_IMAGES = {
   waterCan: '/src/assets/images/product_water_can_20l_1795644635337.jpg',
@@ -191,11 +288,16 @@ export interface CheckoutValidationInput {
   customerName: string;
   customerMobile: string;
   address: string;
+  customerLat?: number | null;
+  customerLng?: number | null;
   serviceMode: ServiceMode;
   eventDate?: string;
   timeSlot?: string;
   itemCount: number;
 }
+
+export const MISSING_GPS_MESSAGE =
+  'Please share your current GPS location first to place the order.';
 
 export function validateCheckoutInput(
   input: CheckoutValidationInput
@@ -216,6 +318,18 @@ export function validateCheckoutInput(
   }
   if (trimmedAddress.length < 8) {
     errors.address = 'Enter your House/Flat No. and a Tolichowki landmark.';
+  }
+  const hasValidGps =
+    typeof input.customerLat === 'number' &&
+    typeof input.customerLng === 'number' &&
+    Number.isFinite(input.customerLat) &&
+    Number.isFinite(input.customerLng) &&
+    input.customerLat >= -90 &&
+    input.customerLat <= 90 &&
+    input.customerLng >= -180 &&
+    input.customerLng <= 180;
+  if (!hasValidGps) {
+    errors.location = MISSING_GPS_MESSAGE;
   }
   if (input.serviceMode === 'events') {
     if (!input.eventDate?.trim()) {
@@ -253,17 +367,22 @@ export function computeSalesMetrics(
 
   for (const order of orders) {
     const amount = Number(order.totalAmount) || 0;
-    if (order.status === 'DELIVERED') {
+    const status = normalizeOrderStatus(order.status);
+    if (status === 'delivered') {
       deliveredCount += 1;
       totalRevenue += amount;
       const revenueTimestamp = order.deliveredAt ?? order.updatedAt ?? order.createdAt;
       if (revenueTimestamp >= startOfDayMs) {
         todayRevenue += amount;
       }
-    } else if (order.status === 'PENDING') {
+    } else if (status === 'pending' || status === 'assigned' || status === 'unassigned') {
       pendingCount += 1;
       activeCount += 1;
-    } else if (order.status === 'ACCEPTED' || order.status === 'OUT_FOR_DELIVERY') {
+    } else if (
+      status === 'accepted' ||
+      status === 'reached_pickup' ||
+      status === 'out_for_delivery'
+    ) {
       activeCount += 1;
     }
   }
@@ -297,16 +416,22 @@ export function formatTimestamp(ts?: number | null): string {
 }
 
 export function getStatusLabel(status: OrderStatus): string {
-  switch (status) {
-    case 'PENDING':
-      return 'Pending Confirmation';
-    case 'ACCEPTED':
-      return 'Accepted & Packing';
-    case 'OUT_FOR_DELIVERY':
+  switch (normalizeOrderStatus(status)) {
+    case 'pending':
+      return 'Order Placed';
+    case 'assigned':
+      return 'Assigned to Rider';
+    case 'unassigned':
+      return 'Unassigned (Timed Out)';
+    case 'accepted':
+      return 'Rider Accepted';
+    case 'reached_pickup':
+      return 'Reached Plant';
+    case 'out_for_delivery':
       return 'Out for Delivery';
-    case 'DELIVERED':
+    case 'delivered':
       return 'Delivered';
-    case 'REJECTED':
+    case 'rejected':
       return 'Order Declined';
     default:
       return status;
@@ -351,8 +476,7 @@ export function slugifyProductId(name: string): string {
 }
 
 export interface CustomerOrderSnapshot {
-  status: OrderStatus;
-  paymentStatus?: 'PENDING' | 'SUCCESSFUL';
+  status: CanonicalOrderStatus;
 }
 
 export interface CustomerOrderAlertEvent {
@@ -363,8 +487,8 @@ export interface CustomerOrderAlertEvent {
 
 /**
  * Compares previous tracked customer order states with the latest Firebase orders
- * and returns a clear user-facing alert whenever an order changes status or
- * UPI payment is verified as SUCCESSFUL.
+ * and returns a clear user-facing alert whenever an order advances through
+ * the 5-stage delivery workflow.
  */
 export function detectCustomerOrderChanges(
   previous: Record<string, CustomerOrderSnapshot>,
@@ -374,31 +498,40 @@ export function detectCustomerOrderChanges(
     const prev = previous[order.id];
     if (!prev) continue;
 
-    if (prev.status !== order.status) {
-      switch (order.status) {
-        case 'ACCEPTED':
+    const currentStatus = normalizeOrderStatus(order.status);
+    if (prev.status !== currentStatus) {
+      switch (currentStatus) {
+        case 'accepted':
           return {
             orderId: order.id,
-            headline: `Order ${order.id} Accepted!`,
+            headline: `Order ${order.id} Accepted by Rider!`,
             detail: order.assignedRiderName
-              ? `Assigned to ${order.assignedRiderName}. Preparing your delivery now.`
-              : 'DailyDrop Tolichowki accepted your order and is packing it now.',
+              ? `${order.assignedRiderName} accepted your order and is heading to the water plant.`
+              : 'Your DailyDrop rider accepted your order and is heading to pickup.',
           };
-        case 'OUT_FOR_DELIVERY':
+        case 'reached_pickup':
+          return {
+            orderId: order.id,
+            headline: `Rider Reached Water Plant (${order.id})`,
+            detail: order.assignedRiderName
+              ? `${order.assignedRiderName} is loading your water cans & chilled drinks now.`
+              : 'Your order is being loaded at our Tolichowki water plant.',
+          };
+        case 'out_for_delivery':
           return {
             orderId: order.id,
             headline: `Order ${order.id} is Out for Delivery!`,
             detail: order.assignedRiderName
-              ? `${order.assignedRiderName} is on the way to your doorstep.`
-              : 'Your rider is on the way — track live on the map.',
+              ? `${order.assignedRiderName} is on the way — tap Track Rider on Map. Keep ${formatRupees(order.totalAmount)} cash ready.`
+              : `Your rider is on the way — keep ${formatRupees(order.totalAmount)} cash ready.`,
           };
-        case 'DELIVERED':
+        case 'delivered':
           return {
             orderId: order.id,
             headline: `Order ${order.id} Delivered!`,
-            detail: 'Thank you for ordering with DailyDrop Tolichowki.',
+            detail: 'Thank you for ordering with DailyDrop Water Tolichowki. Delivery photo proof saved.',
           };
-        case 'REJECTED':
+        case 'rejected':
           return {
             orderId: order.id,
             headline: `Order ${order.id} Update`,
@@ -408,27 +541,20 @@ export function detectCustomerOrderChanges(
           break;
       }
     }
-
-    if (prev.paymentStatus !== 'SUCCESSFUL' && order.paymentStatus === 'SUCCESSFUL') {
-      return {
-        orderId: order.id,
-        headline: `UPI Payment Verified for ${order.id}`,
-        detail: `Payment of ${formatRupees(order.totalAmount)} marked SUCCESSFUL.`,
-      };
-    }
   }
 
   return null;
 }
 
 /**
- * Selects all completed orders (DELIVERED or REJECTED) eligible for weekly cleanup,
- * leaving active orders (PENDING, ACCEPTED, OUT_FOR_DELIVERY) untouched.
+ * Selects all completed orders (delivered or rejected) eligible for weekly cleanup,
+ * leaving active orders untouched.
  */
 export function getCompletedOrdersForCleanup(orders: Order[]): Order[] {
-  return orders.filter(
-    (order) => order.status === 'DELIVERED' || order.status === 'REJECTED'
-  );
+  return orders.filter((order) => {
+    const s = normalizeOrderStatus(order.status);
+    return s === 'delivered' || s === 'rejected';
+  });
 }
 
 /**
@@ -441,18 +567,15 @@ export function getInactiveCustomerMobilesForCleanup(
 ): string[] {
   const activeMobiles = new Set<string>();
   for (const order of orders) {
-    if (
-      order.status === 'PENDING' ||
-      order.status === 'ACCEPTED' ||
-      order.status === 'OUT_FOR_DELIVERY'
-    ) {
+    if (isActiveOrderStatus(order.status)) {
       activeMobiles.add(order.customerMobile.replace(/\D/g, ''));
     }
   }
 
   const completedMobiles = new Set<string>();
   for (const order of orders) {
-    if (order.status === 'DELIVERED' || order.status === 'REJECTED') {
+    const s = normalizeOrderStatus(order.status);
+    if (s === 'delivered' || s === 'rejected') {
       completedMobiles.add(order.customerMobile.replace(/\D/g, ''));
     }
   }

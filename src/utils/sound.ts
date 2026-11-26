@@ -2,20 +2,21 @@ export const MAX_RINGTONE_BYTES = 3 * 1024 * 1024; // 3 MB
 
 export type RingtoneRole = 'owner' | 'rider';
 
-export const OWNER_VIBRATION_PATTERN = [600, 250, 600, 250, 800];
-export const RIDER_VIBRATION_PATTERN = [500, 200, 500, 200, 700];
+export const ORDER_ALERT_VIBRATION_PATTERN = [500, 300, 500, 300, 500];
+export const OWNER_VIBRATION_PATTERN = ORDER_ALERT_VIBRATION_PATTERN;
+export const RIDER_VIBRATION_PATTERN = ORDER_ALERT_VIBRATION_PATTERN;
 export const CUSTOMER_VIBRATION_PATTERN = [300, 150, 300];
 
 const STORAGE_KEYS: Record<RingtoneRole, { data: string; name: string; fallbackLabel: string }> = {
   owner: {
     data: 'dailydrop_custom_ringtone_data',
     name: 'dailydrop_custom_ringtone_name',
-    fallbackLabel: 'Built-In Dual-Tone Siren',
+    fallbackLabel: 'DailyDrop Dual-Tone Alert Chime',
   },
   rider: {
     data: 'dailydrop_rider_ringtone_data',
     name: 'dailydrop_rider_ringtone_name',
-    fallbackLabel: 'Built-In Delivery Siren',
+    fallbackLabel: 'DailyDrop Dual-Tone Delivery Chime',
   },
 };
 
@@ -216,11 +217,16 @@ export function installGlobalAudioUnlock(): () => void {
 }
 
 /**
- * Owner Controller: High-volume dual-tone siren via Web Audio API.
+ * Original DailyDrop High-Alert Dual-Tone Delivery Chime via Web Audio API.
+ * Distinct alternating fifth-interval cadence (F#5+C#6 -> B5+F#6 double-pulse)
+ * designed to cut through street noise without resembling third-party app tones.
  */
-export function playOwnerDualToneSiren(withVibration: boolean = true): boolean {
+export function playDailyDropDualToneChime(
+  role: RingtoneRole = 'owner',
+  withVibration: boolean = true
+): boolean {
   if (withVibration) {
-    triggerVibration(OWNER_VIBRATION_PATTERN);
+    triggerVibration(ORDER_ALERT_VIBRATION_PATTERN);
   }
 
   const ctx = getAudioContext();
@@ -229,46 +235,55 @@ export function playOwnerDualToneSiren(withVibration: boolean = true): boolean {
   try {
     const now = ctx.currentTime;
     const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.85, now);
+    masterGain.gain.setValueAtTime(0.9, now);
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(3400, now);
+    filter.frequency.setValueAtTime(4200, now);
     filter.connect(masterGain);
     masterGain.connect(ctx.destination);
 
-    // 3 urgent dual-tone pulses spanning ~1.65 seconds (fits cleanly inside 2s loop)
-    const pulses = [
-      { start: 0.0, duration: 0.24, f1: 880, f2: 1174.66 },
-      { start: 0.27, duration: 0.26, f1: 1108.73, f2: 1479.98 },
-      { start: 0.62, duration: 0.24, f1: 880, f2: 1174.66 },
-      { start: 0.89, duration: 0.26, f1: 1108.73, f2: 1479.98 },
-      { start: 1.24, duration: 0.34, f1: 1318.51, f2: 1760.0 },
-    ];
+    // Distinct frequency voicing per role while both share DailyDrop's signature dual-tone cadence
+    const pulses =
+      role === 'rider'
+        ? [
+            { start: 0.0, duration: 0.22, f1: 739.99, f2: 1108.73 }, // F#5 + C#6
+            { start: 0.26, duration: 0.24, f1: 987.77, f2: 1479.98 }, // B5 + F#6
+            { start: 0.72, duration: 0.22, f1: 739.99, f2: 1108.73 },
+            { start: 0.98, duration: 0.34, f1: 987.77, f2: 1479.98 },
+            { start: 1.42, duration: 0.26, f1: 1174.66, f2: 1760.0 }, // D6 + A6 bright finish
+          ]
+        : [
+            { start: 0.0, duration: 0.24, f1: 659.25, f2: 987.77 }, // E5 + B5
+            { start: 0.28, duration: 0.24, f1: 880.0, f2: 1318.51 }, // A5 + E6
+            { start: 0.74, duration: 0.24, f1: 659.25, f2: 987.77 },
+            { start: 1.02, duration: 0.36, f1: 880.0, f2: 1318.51 },
+            { start: 1.46, duration: 0.26, f1: 1046.5, f2: 1567.98 }, // C6 + G6
+          ];
 
     for (const pulse of pulses) {
-      const oscA = ctx.createOscillator();
-      const oscB = ctx.createOscillator();
+      const oscPrimary = ctx.createOscillator();
+      const oscHarmony = ctx.createOscillator();
       const env = ctx.createGain();
 
-      oscA.type = 'sawtooth';
-      oscB.type = 'square';
-      oscA.frequency.setValueAtTime(pulse.f1, now + pulse.start);
-      oscB.frequency.setValueAtTime(pulse.f2, now + pulse.start);
+      oscPrimary.type = 'triangle';
+      oscHarmony.type = 'sine';
+      oscPrimary.frequency.setValueAtTime(pulse.f1, now + pulse.start);
+      oscHarmony.frequency.setValueAtTime(pulse.f2, now + pulse.start);
 
       env.gain.setValueAtTime(0.0001, now + pulse.start);
-      env.gain.exponentialRampToValueAtTime(0.42, now + pulse.start + 0.015);
-      env.gain.setValueAtTime(0.38, now + pulse.start + pulse.duration - 0.03);
-      env.gain.exponentialRampToValueAtTime(0.0001, now + pulse.start + pulse.duration);
+      env.gain.exponentialRampToValueAtTime(0.55, now + pulse.start + 0.015);
+      env.gain.setValueAtTime(0.46, now + pulse.start + pulse.duration - 0.04);
+      env.gain.exponentialRampToValueAtTime(0.0008, now + pulse.start + pulse.duration);
 
-      oscA.connect(env);
-      oscB.connect(env);
+      oscPrimary.connect(env);
+      oscHarmony.connect(env);
       env.connect(filter);
 
-      oscA.start(now + pulse.start);
-      oscB.start(now + pulse.start);
-      oscA.stop(now + pulse.start + pulse.duration + 0.02);
-      oscB.stop(now + pulse.start + pulse.duration + 0.02);
+      oscPrimary.start(now + pulse.start);
+      oscHarmony.start(now + pulse.start);
+      oscPrimary.stop(now + pulse.start + pulse.duration + 0.02);
+      oscHarmony.stop(now + pulse.start + pulse.duration + 0.02);
     }
 
     return true;
@@ -278,12 +293,11 @@ export function playOwnerDualToneSiren(withVibration: boolean = true): boolean {
 }
 
 /**
- * Rider App: Loud Zomato-style delivery assignment alert siren + vibration.
+ * Plays a crisp 1-second dual-tone test chime + short haptic tap to unlock mobile WebView audio.
  */
-export function playRiderDeliverySiren(withVibration: boolean = true): boolean {
-  if (withVibration) {
-    triggerVibration(RIDER_VIBRATION_PATTERN);
-  }
+export function playShortTestChime(role: RingtoneRole = 'owner'): boolean {
+  unlockAudioContext();
+  triggerVibration([200, 120, 200]);
 
   const ctx = getAudioContext();
   if (!ctx) return false;
@@ -291,52 +305,64 @@ export function playRiderDeliverySiren(withVibration: boolean = true): boolean {
   try {
     const now = ctx.currentTime;
     const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.88, now);
+    masterGain.gain.setValueAtTime(0.85, now);
     masterGain.connect(ctx.destination);
 
-    // Rapid bright Zomato-style ascending bell-siren repeated twice in ~1.7s
-    const notes = [
-      { freq: 987.77, start: 0.0, duration: 0.14 },
-      { freq: 1318.51, start: 0.14, duration: 0.14 },
-      { freq: 1567.98, start: 0.28, duration: 0.16 },
-      { freq: 1975.53, start: 0.44, duration: 0.26 },
-      { freq: 987.77, start: 0.85, duration: 0.14 },
-      { freq: 1318.51, start: 0.99, duration: 0.14 },
-      { freq: 1567.98, start: 1.13, duration: 0.16 },
-      { freq: 1975.53, start: 1.29, duration: 0.34 },
-    ];
+    const tones =
+      role === 'rider'
+        ? [
+            { start: 0.0, duration: 0.26, f1: 739.99, f2: 1108.73 },
+            { start: 0.3, duration: 0.3, f1: 987.77, f2: 1479.98 },
+            { start: 0.64, duration: 0.32, f1: 1174.66, f2: 1760.0 },
+          ]
+        : [
+            { start: 0.0, duration: 0.26, f1: 659.25, f2: 987.77 },
+            { start: 0.3, duration: 0.3, f1: 880.0, f2: 1318.51 },
+            { start: 0.64, duration: 0.32, f1: 1046.5, f2: 1567.98 },
+          ];
 
-    for (const note of notes) {
-      const oscMain = ctx.createOscillator();
-      const oscHarm = ctx.createOscillator();
+    for (const tone of tones) {
+      const oscA = ctx.createOscillator();
+      const oscB = ctx.createOscillator();
       const env = ctx.createGain();
 
-      oscMain.type = 'triangle';
-      oscHarm.type = 'sine';
-      oscMain.frequency.setValueAtTime(note.freq, now + note.start);
-      oscHarm.frequency.setValueAtTime(note.freq * 1.5, now + note.start);
+      oscA.type = 'triangle';
+      oscB.type = 'sine';
+      oscA.frequency.setValueAtTime(tone.f1, now + tone.start);
+      oscB.frequency.setValueAtTime(tone.f2, now + tone.start);
 
-      env.gain.setValueAtTime(0.0001, now + note.start);
-      env.gain.exponentialRampToValueAtTime(0.55, now + note.start + 0.015);
-      env.gain.exponentialRampToValueAtTime(
-        0.0008,
-        now + note.start + note.duration
-      );
+      env.gain.setValueAtTime(0.0001, now + tone.start);
+      env.gain.exponentialRampToValueAtTime(0.5, now + tone.start + 0.015);
+      env.gain.exponentialRampToValueAtTime(0.0008, now + tone.start + tone.duration);
 
-      oscMain.connect(env);
-      oscHarm.connect(env);
+      oscA.connect(env);
+      oscB.connect(env);
       env.connect(masterGain);
 
-      oscMain.start(now + note.start);
-      oscHarm.start(now + note.start);
-      oscMain.stop(now + note.start + note.duration + 0.02);
-      oscHarm.stop(now + note.start + note.duration + 0.02);
+      oscA.start(now + tone.start);
+      oscB.start(now + tone.start);
+      oscA.stop(now + tone.start + tone.duration + 0.02);
+      oscB.stop(now + tone.start + tone.duration + 0.02);
     }
 
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Owner Controller: High-volume dual-tone chime via Web Audio API.
+ */
+export function playOwnerDualToneSiren(withVibration: boolean = true): boolean {
+  return playDailyDropDualToneChime('owner', withVibration);
+}
+
+/**
+ * Rider App: Original DailyDrop high-alert delivery chime + Android vibration.
+ */
+export function playRiderDeliverySiren(withVibration: boolean = true): boolean {
+  return playDailyDropDualToneChime('rider', withVibration);
 }
 
 /**

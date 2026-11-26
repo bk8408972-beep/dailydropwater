@@ -6,8 +6,8 @@ import {
   computeSalesMetrics,
   formatRupees,
   formatTimestamp,
-  sanitizePhoneForTel,
 } from '../../utils/domain';
+import { triggerPhoneCall } from '../../utils/androidIntents';
 
 interface SalesCustomersTabProps {
   orders: Order[];
@@ -100,7 +100,6 @@ export function SalesCustomersTab({
         ) : (
           <div className="divide-y divide-slate-100">
             {customers.map((customer) => {
-              const tel = sanitizePhoneForTel(customer.mobile);
               return (
                 <div
                   key={customer.mobile}
@@ -129,13 +128,14 @@ export function SalesCustomersTab({
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
-                    <a
-                      href={`tel:${tel}`}
-                      className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold flex items-center gap-1.5"
+                    <button
+                      type="button"
+                      onClick={() => triggerPhoneCall(customer.mobile, onNotify)}
+                      className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
                     >
                       <Phone className="w-3.5 h-3.5" aria-hidden="true" />
                       <span>Call</span>
-                    </a>
+                    </button>
 
                     {confirmDeleteMobile === customer.mobile ? (
                       <div className="flex items-center gap-1.5">

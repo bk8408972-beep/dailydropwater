@@ -77,11 +77,13 @@ test('calculateCartTotals computes accurate item count and rupee subtotal', () =
   assert.equal(totals.subtotal, 275);
 });
 
-test('validateCheckoutInput rejects missing fields and enforces 10-digit mobile and events date', () => {
+test('validateCheckoutInput rejects missing fields, enforces 10-digit mobile, mandatory GPS, and events date', () => {
   const invalidFast = validateCheckoutInput({
     customerName: 'A',
     customerMobile: '12345',
     address: 'Flat 1',
+    customerLat: null,
+    customerLng: null,
     serviceMode: 'fast',
     itemCount: 0,
   });
@@ -89,11 +91,17 @@ test('validateCheckoutInput rejects missing fields and enforces 10-digit mobile 
   assert.ok(invalidFast.customerName);
   assert.ok(invalidFast.customerMobile);
   assert.ok(invalidFast.address);
+  assert.equal(
+    invalidFast.location,
+    'Please share your current GPS location first to place the order.'
+  );
 
   const invalidEvents = validateCheckoutInput({
     customerName: 'Syed Ahmed',
     customerMobile: '9848012345',
     address: 'Flat 302, Paramount Colony, Tolichowki',
+    customerLat: 17.3991,
+    customerLng: 78.4152,
     serviceMode: 'events',
     eventDate: '',
     timeSlot: '',
@@ -107,13 +115,15 @@ test('validateCheckoutInput rejects missing fields and enforces 10-digit mobile 
     customerName: 'Syed Ahmed',
     customerMobile: '9848012345',
     address: 'Flat 302, Paramount Colony, Tolichowki',
+    customerLat: 17.3991,
+    customerLng: 78.4152,
     serviceMode: 'fast',
     itemCount: 2,
   });
   assert.equal(Object.keys(valid).length, 0);
 });
 
-test('computeSalesMetrics separates today revenue, delivered count, and pending count', () => {
+test('computeSalesMetrics supports both canonical lowercase and legacy uppercase statuses', () => {
   const now = new Date('2026-11-25T15:00:00Z').getTime();
   const yesterday = now - 36 * 60 * 60 * 1000;
 
@@ -127,7 +137,7 @@ test('computeSalesMetrics separates today revenue, delivered count, and pending 
       paymentMethod: 'Cash on Delivery',
       items: [],
       totalAmount: 180,
-      status: 'DELIVERED',
+      status: 'delivered',
       createdAt: now - 3600_000,
       updatedAt: now - 1800_000,
       deliveredAt: now - 1800_000,
@@ -138,7 +148,7 @@ test('computeSalesMetrics separates today revenue, delivered count, and pending 
       customerMobile: '9000000002',
       address: 'Tolichowki',
       serviceMode: 'fast',
-      paymentMethod: 'UPI on Delivery',
+      paymentMethod: 'Cash on Delivery',
       items: [],
       totalAmount: 220,
       status: 'DELIVERED',
@@ -155,9 +165,22 @@ test('computeSalesMetrics separates today revenue, delivered count, and pending 
       paymentMethod: 'Cash on Delivery',
       items: [],
       totalAmount: 900,
-      status: 'PENDING',
+      status: 'pending',
       createdAt: now - 600_000,
       updatedAt: now - 600_000,
+    },
+    {
+      id: 'DD-4',
+      customerName: 'D',
+      customerMobile: '9000000004',
+      address: 'Tolichowki',
+      serviceMode: 'fast',
+      paymentMethod: 'Cash on Delivery',
+      items: [],
+      totalAmount: 90,
+      status: 'reached_pickup',
+      createdAt: now - 300_000,
+      updatedAt: now - 200_000,
     },
   ];
 
@@ -166,7 +189,7 @@ test('computeSalesMetrics separates today revenue, delivered count, and pending 
   assert.equal(metrics.totalRevenue, 400);
   assert.equal(metrics.deliveredCount, 2);
   assert.equal(metrics.pendingCount, 1);
-  assert.equal(metrics.activeCount, 1);
+  assert.equal(metrics.activeCount, 2);
 });
 
 test('sanitization helpers produce safe tel, maps, and selfie data URLs', () => {
@@ -223,7 +246,7 @@ test('validateAudioFile enforces 3 MB max limit and valid audio formats', async 
   assert.equal(isSafeAudioDataUrl('javascript:alert(1)'), false);
 });
 
-test('detectCustomerOrderChanges triggers alerts on status transitions and UPI verification', async () => {
+test('detectCustomerOrderChanges triggers alerts across all 5 delivery workflow steps', async () => {
   const { detectCustomerOrderChanges } = await import('./domain');
   const baseOrder: Order = {
     id: 'DD-555',
@@ -231,46 +254,62 @@ test('detectCustomerOrderChanges triggers alerts on status transitions and UPI v
     customerMobile: '9848011122',
     address: 'Paramount Colony, Tolichowki',
     serviceMode: 'fast',
-    paymentMethod: 'UPI on Delivery',
-    paymentStatus: 'PENDING',
+    paymentMethod: 'Cash on Delivery',
     items: [],
     totalAmount: 180,
-    status: 'ACCEPTED',
+    status: 'accepted',
     assignedRiderName: 'Imran',
     createdAt: 1,
     updatedAt: 2,
   };
 
   const acceptedEvent = detectCustomerOrderChanges(
-    { 'DD-555': { status: 'PENDING', paymentStatus: 'PENDING' } },
+    { 'DD-555': { status: 'pending' } },
     [baseOrder]
   );
   assert.ok(acceptedEvent);
   assert.match(acceptedEvent.headline, /Accepted/);
 
-  const upiEvent = detectCustomerOrderChanges(
-    { 'DD-555': { status: 'ACCEPTED', paymentStatus: 'PENDING' } },
-    [{ ...baseOrder, paymentStatus: 'SUCCESSFUL' }]
+  const reachedEvent = detectCustomerOrderChanges(
+    { 'DD-555': { status: 'accepted' } },
+    [{ ...baseOrder, status: 'reached_pickup' }]
   );
-  assert.ok(upiEvent);
-  assert.match(upiEvent.headline, /UPI Payment Verified/);
+  assert.ok(reachedEvent);
+  assert.match(reachedEvent.headline, /Water Plant/);
+
+  const outEvent = detectCustomerOrderChanges(
+    { 'DD-555': { status: 'reached_pickup' } },
+    [{ ...baseOrder, status: 'out_for_delivery' }]
+  );
+  assert.ok(outEvent);
+  assert.match(outEvent.headline, /Out for Delivery/);
+
+  const deliveredEvent = detectCustomerOrderChanges(
+    { 'DD-555': { status: 'out_for_delivery' } },
+    [{ ...baseOrder, status: 'delivered' }]
+  );
+  assert.ok(deliveredEvent);
+  assert.match(deliveredEvent.headline, /Delivered/);
 
   const noChange = detectCustomerOrderChanges(
-    { 'DD-555': { status: 'ACCEPTED', paymentStatus: 'PENDING' } },
+    { 'DD-555': { status: 'accepted' } },
     [baseOrder]
   );
   assert.equal(noChange, null);
 });
 
-test('vibration patterns match requested Owner and Customer specifications', async () => {
-  const { OWNER_VIBRATION_PATTERN, CUSTOMER_VIBRATION_PATTERN } = await import(
-    './sound'
-  );
-  assert.deepEqual(OWNER_VIBRATION_PATTERN, [600, 250, 600, 250, 800]);
+test('vibration patterns match requested Owner, Rider, and Customer specifications', async () => {
+  const {
+    OWNER_VIBRATION_PATTERN,
+    RIDER_VIBRATION_PATTERN,
+    CUSTOMER_VIBRATION_PATTERN,
+  } = await import('./sound');
+  assert.deepEqual(OWNER_VIBRATION_PATTERN, [500, 300, 500, 300, 500]);
+  assert.deepEqual(RIDER_VIBRATION_PATTERN, [500, 300, 500, 300, 500]);
   assert.deepEqual(CUSTOMER_VIBRATION_PATTERN, [300, 150, 300]);
 });
 
-test('weekly cleanup selects only DELIVERED/REJECTED orders and preserves active orders & active customers', async () => {
+test('weekly cleanup selects only delivered/rejected orders and preserves active orders & active customers', async () => {
   const {
     getCompletedOrdersForCleanup,
     getInactiveCustomerMobilesForCleanup,
@@ -286,7 +325,7 @@ test('weekly cleanup selects only DELIVERED/REJECTED orders and preserves active
       paymentMethod: 'Cash on Delivery',
       items: [],
       totalAmount: 90,
-      status: 'DELIVERED',
+      status: 'delivered',
       createdAt: 1,
       updatedAt: 2,
     },
@@ -296,7 +335,7 @@ test('weekly cleanup selects only DELIVERED/REJECTED orders and preserves active
       customerMobile: '9000000002',
       address: 'Tolichowki',
       serviceMode: 'fast',
-      paymentMethod: 'UPI on Delivery',
+      paymentMethod: 'Cash on Delivery',
       items: [],
       totalAmount: 180,
       status: 'REJECTED',
@@ -312,7 +351,7 @@ test('weekly cleanup selects only DELIVERED/REJECTED orders and preserves active
       paymentMethod: 'Cash on Delivery',
       items: [],
       totalAmount: 95,
-      status: 'ACCEPTED',
+      status: 'reached_pickup',
       createdAt: 5,
       updatedAt: 6,
     },
@@ -330,6 +369,47 @@ test('weekly cleanup selects only DELIVERED/REJECTED orders and preserves active
     '9000000003',
   ]);
   assert.deepEqual(inactiveMobiles.sort(), ['9000000001', '9000000002']);
+});
+
+test('androidIntents produces Android Intent URLs on Android WebView and safe fallbacks on desktop', async () => {
+  const {
+    formatIndianPhoneE164,
+    buildPhoneCallUrl,
+    buildMapsDirectionsUrl,
+    buildTrackRiderMapUrl,
+  } = await import('./androidIntents');
+
+  const androidUa =
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36';
+  const desktopUa =
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+
+  assert.equal(formatIndianPhoneE164('9848012345'), '+919848012345');
+  assert.equal(formatIndianPhoneE164('+91 98480-12345'), '+919848012345');
+
+  assert.equal(
+    buildPhoneCallUrl('9848012345', androidUa),
+    'intent://+919848012345#Intent;scheme=tel;package=com.android.server.telecom;end'
+  );
+  assert.equal(buildPhoneCallUrl('9848012345', desktopUa), 'tel:+919848012345');
+
+  assert.equal(
+    buildMapsDirectionsUrl(17.3984, 78.4146, androidUa),
+    'intent://maps.google.com/maps?daddr=17.398400,78.414600#Intent;scheme=https;package=com.google.android.apps.maps;end'
+  );
+  assert.equal(
+    buildMapsDirectionsUrl(17.3984, 78.4146, desktopUa),
+    'https://www.google.com/maps/dir/?api=1&destination=17.398400,78.414600'
+  );
+
+  assert.equal(
+    buildTrackRiderMapUrl(17.4002, 78.4161, androidUa),
+    'intent://maps.google.com/maps?q=17.400200,78.416100#Intent;scheme=https;package=com.google.android.apps.maps;end'
+  );
+  assert.equal(
+    buildTrackRiderMapUrl(17.4002, 78.4161, desktopUa),
+    'https://maps.google.com/?q=17.400200,78.416100'
+  );
 });
 
 

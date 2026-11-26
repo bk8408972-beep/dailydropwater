@@ -1,12 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Banknote,
   Bell,
   Calendar,
+  Camera,
   CheckCircle2,
   Clock,
   LocateFixed,
   MapPin,
   Minus,
+  Navigation,
   Phone,
   Plus,
   ShoppingBag,
@@ -20,7 +23,6 @@ import type {
   GeoPoint,
   Order,
   OrderItem,
-  PaymentMethod,
   Product,
   ProductCategory,
   RiderRecord,
@@ -35,19 +37,35 @@ import {
 } from '../services/firebaseDb';
 import {
   calculateCartTotals,
+  COD_DISPLAY_LABEL,
   createOrderId,
   detectCustomerOrderChanges,
   EVENT_TIME_SLOTS,
   formatRupees,
   formatTimestamp,
   getStatusLabel,
+  isActiveOrderStatus,
+  isSafeImageDataUrl,
+  MISSING_GPS_MESSAGE,
+  normalizeOrderStatus,
   PRODUCT_CATEGORIES,
-  sanitizePhoneForTel,
+  resolveOrderCustomerCoords,
+  resolveOrderRiderCoords,
   validateCheckoutInput,
   type CustomerOrderAlertEvent,
   type CustomerOrderSnapshot,
 } from '../utils/domain';
-import { checkTolichowkiZone, type ZoneCheckResult } from '../utils/geo';
+import {
+  checkTolichowkiZone,
+  isValidGeoPoint,
+  type ZoneCheckResult,
+} from '../utils/geo';
+import {
+  buildTrackRiderMapUrl,
+  formatIndianPhoneE164,
+  openExternalMapUrl,
+  triggerPhoneCall,
+} from '../utils/androidIntents';
 import {
   installGlobalAudioUnlock,
   playCustomerStatusChime,
@@ -57,14 +75,17 @@ import { ProductImage } from './ProductImage';
 import { BrandLogo } from './BrandLogo';
 import { LiveOrderMap } from './LiveOrderMap';
 import { PWAInstallButton } from './PWAInstallButton';
+import { BackExitToast } from './BackExitToast';
+import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 
 const CUSTOMER_MOBILE_KEY = 'dailydrop_customer_mobile';
 
 const STATUS_STEPS = [
-  { key: 'PENDING', label: 'Placed' },
-  { key: 'ACCEPTED', label: 'Accepted' },
-  { key: 'OUT_FOR_DELIVERY', label: 'On the Way' },
-  { key: 'DELIVERED', label: 'Delivered' },
+  { key: 'pending', label: 'Order Placed' },
+  { key: 'accepted', label: 'Rider Accepted' },
+  { key: 'reached_pickup', label: 'Reached Plant' },
+  { key: 'out_for_delivery', label: 'Out for Delivery' },
+  { key: 'delivered', label: 'Delivered' },
 ] as const;
 
 interface CustomerAppProps {
@@ -103,10 +124,12 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     }
   });
   const [address, setAddress] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Cash on Delivery');
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [submittingOrder, setSubmittingOrder] = useState(false);
   const [orderBanner, setOrderBanner] = useState<string | null>(null);
+  const [zoomPhoto, setZoomPhoto] = useState<{ orderId: string; src: string } | null>(
+    null
+  );
 
   // Orders & Riders live tracking
   const [allOrders, setAllOrders] = useState<Order[]>([]);
@@ -129,6 +152,21 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   useEffect(() => {
     return installGlobalAudioUnlock();
   }, []);
+
+  // Prevent accidental app exit on Android hardware/gesture Back button
+  const { exitPromptVisible } = useAndroidBackGuard({
+    scope: 'customer',
+    hasOpenOverlay: Boolean(zoomPhoto || checkoutOpen),
+    onCloseOverlay: () => {
+      if (zoomPhoto) {
+        setZoomPhoto(null);
+      } else if (checkoutOpen) {
+        setCheckoutOpen(false);
+      }
+    },
+    isOnSubView: activeTab !== 'shop',
+    onReturnHome: () => setActiveTab('shop'),
+  });
 
   // Live products subscription + auto-seeding if empty
   useEffect(() => {
@@ -217,17 +255,11 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   }, [allOrders, trackMobile]);
 
   const activeOrderCount = useMemo(
-    () =>
-      myOrders.filter(
-        (o) =>
-          o.status === 'PENDING' ||
-          o.status === 'ACCEPTED' ||
-          o.status === 'OUT_FOR_DELIVERY'
-      ).length,
+    () => myOrders.filter((o) => isActiveOrderStatus(o.status)).length,
     [myOrders]
   );
 
-  // Detect live order status transitions & UPI payment verification -> play loud 3-note chime + vibrate + banner
+  // Detect live 5-step order status transitions -> play loud 3-note chime + vibrate + banner
   useEffect(() => {
     if (!ordersLoaded) return;
     const cleanDigits = trackMobile.replace(/\D/g, '');
@@ -240,8 +272,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     const nextSnapshots: Record<string, CustomerOrderSnapshot> = {};
     for (const ord of myOrders) {
       nextSnapshots[ord.id] = {
-        status: ord.status,
-        paymentStatus: ord.paymentStatus,
+        status: normalizeOrderStatus(ord.status),
       };
     }
 
@@ -278,19 +309,24 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           lng: Number(pos.coords.longitude.toFixed(6)),
         };
         setCustomerLocation(coords);
-        const result = checkTolichowkiZone(coords.lat, coords.lng);
-        setZoneResult(result);
+        setZoneResult(checkTolichowkiZone(coords.lat, coords.lng));
+        setFormErrors((prev) => {
+          if (!prev.location) return prev;
+          const next = { ...prev };
+          delete next.location;
+          return next;
+        });
         setLocating(false);
       },
       (err) => {
         setLocating(false);
         if (err.code === err.PERMISSION_DENIED) {
           setLocationError(
-            'Location permission was denied. Please enable GPS in your browser to verify the 3 km Tolichowki zone.'
+            'Location permission was denied. Please enable GPS in your browser or app settings and tap Share Current Location again.'
           );
         } else {
           setLocationError(
-            'Could not read your GPS coordinates right now. You can still place an order with your Tolichowki landmark.'
+            'Could not read your GPS coordinates right now. Please turn on phone GPS and tap Share Current Location again.'
           );
         }
       },
@@ -312,6 +348,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     });
   };
 
+  const hasValidGps = isValidGeoPoint(customerLocation);
+
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     unlockAudioContext();
@@ -319,13 +357,15 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       customerName,
       customerMobile,
       address,
+      customerLat: customerLocation?.lat ?? null,
+      customerLng: customerLocation?.lng ?? null,
       serviceMode,
       eventDate,
       timeSlot,
       itemCount,
     });
     setFormErrors(errors);
-    if (Object.keys(errors).length > 0) return;
+    if (Object.keys(errors).length > 0 || !customerLocation) return;
 
     const cleanMobile = sanitizeFirebaseKey(customerMobile.replace(/\D/g, ''));
     const productMap = new Map(products.map((p) => [p.id, p]));
@@ -361,7 +401,10 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         customerName: customerName.trim(),
         customerMobile: cleanMobile,
         address: address.trim(),
-        customerLocation: customerLocation ?? null,
+        customerLat: customerLocation.lat,
+        customerLng: customerLocation.lng,
+        customerLocation,
+        ownerApproved: false,
         serviceMode,
         eventDetails:
           serviceMode === 'events'
@@ -371,12 +414,10 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 notes: eventNotes.trim(),
               }
             : null,
-        paymentMethod,
-        paymentStatus:
-          paymentMethod === 'UPI on Delivery' ? 'PENDING' : undefined,
+        paymentMethod: 'Cash on Delivery',
         items,
         totalAmount: subtotal,
-        status: 'PENDING',
+        status: 'pending',
         assignedRiderId: null,
         assignedRiderName: null,
         assignedRiderMobile: null,
@@ -398,7 +439,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       setCheckoutOpen(false);
       setActiveTab('orders');
       setOrderBanner(
-        `Order ${orderId} placed! DailyDrop Tolichowki will accept and dispatch shortly.`
+        `Order ${orderId} placed! ${COD_DISPLAY_LABEL} · Total ${formatRupees(subtotal)}.`
       );
     } catch (err) {
       setFormErrors({
@@ -413,7 +454,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-28">
+    <div className="app-scroll-page bg-slate-50 pb-safe-bar">
       {/* Compact Sticky Top Header (Single-row, clean brand + My Orders tab) */}
       <header className="sticky top-0 z-30 bg-blue-800 text-white shadow-sm">
         <div className="max-w-6xl mx-auto px-3 sm:px-6 min-h-[60px] py-2 flex items-center justify-between gap-2">
@@ -461,7 +502,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         </div>
       </header>
 
-      {/* Prominent Live Order Status / UPI Verified Alert Banner */}
+      {/* Prominent Live Order Status Alert Banner */}
       {liveStatusAlert && (
         <div
           role="alert"
@@ -940,12 +981,37 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
             ) : (
               <div className="space-y-4">
                 {myOrders.map((order) => {
+                  const canonicalStatus = normalizeOrderStatus(order.status);
+                  const trackerKey =
+                    canonicalStatus === 'assigned' || canonicalStatus === 'unassigned'
+                      ? 'pending'
+                      : canonicalStatus;
                   const stepIdx = STATUS_STEPS.findIndex(
-                    (s) => s.key === order.status
+                    (s) => s.key === trackerKey
                   );
-                  const riderTel = order.assignedRiderMobile
-                    ? sanitizePhoneForTel(order.assignedRiderMobile)
+                  const riderMobile =
+                    order.assignedRiderMobile ||
+                    (order.assignedRiderId
+                      ? ridersMap[order.assignedRiderId]?.mobile
+                      : null) ||
+                    null;
+                  const riderE164 = riderMobile
+                    ? formatIndianPhoneE164(riderMobile)
                     : '';
+                  const customerCoords = resolveOrderCustomerCoords(order);
+                  const liveRiderCoords = resolveOrderRiderCoords(
+                    order,
+                    order.assignedRiderId
+                      ? ridersMap[order.assignedRiderId]?.liveLocation ?? null
+                      : null
+                  );
+                  const isOutForDelivery = canonicalStatus === 'out_for_delivery';
+                  const hasDeliveryPhoto = isSafeImageDataUrl(order.deliveryPhoto);
+                  const showEmbeddedMap =
+                    Boolean(order.assignedRiderId) &&
+                    (canonicalStatus === 'accepted' ||
+                      canonicalStatus === 'reached_pickup' ||
+                      canonicalStatus === 'out_for_delivery');
 
                   return (
                     <article
@@ -969,12 +1035,13 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                         </div>
                       </div>
 
-                      {/* Step Progress */}
-                      {order.status !== 'REJECTED' ? (
+                      {/* Live 5-Step Progress Tracker */}
+                      {canonicalStatus !== 'rejected' ? (
                         <div className="py-4">
-                          <div className="grid grid-cols-4 gap-2">
+                          <div className="grid grid-cols-5 gap-1.5">
                             {STATUS_STEPS.map((step, idx) => {
                               const completed = stepIdx >= idx;
+                              const isCurrent = stepIdx === idx;
                               return (
                                 <div key={step.key} className="text-center">
                                   <div
@@ -983,8 +1050,12 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                                     }`}
                                   />
                                   <span
-                                    className={`text-xs font-semibold block ${
-                                      completed ? 'text-blue-900' : 'text-slate-400'
+                                    className={`text-[10px] sm:text-xs font-semibold block leading-tight ${
+                                      isCurrent
+                                        ? 'text-blue-700 font-extrabold'
+                                        : completed
+                                          ? 'text-blue-950'
+                                          : 'text-slate-400'
                                     }`}
                                   >
                                     {step.label}
@@ -1001,28 +1072,52 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                         </div>
                       )}
 
-                      {/* Embedded Live Map when ACCEPTED or OUT_FOR_DELIVERY with assigned rider */}
-                      {order.assignedRiderId &&
-                      (order.status === 'ACCEPTED' ||
-                        order.status === 'OUT_FOR_DELIVERY') ? (
+                      {/* Prominent "Track Rider on Map" button during out_for_delivery */}
+                      {isOutForDelivery && liveRiderCoords && (
+                        <div className="mb-3 rounded-xl bg-blue-50 border border-blue-200 p-3.5 flex flex-wrap items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-blue-900">
+                              Rider is On the Way to Your Location
+                            </p>
+                            <p className="text-[11px] text-blue-700 tabular-nums mt-0.5">
+                              Live GPS: {liveRiderCoords.lat.toFixed(5)},{' '}
+                              {liveRiderCoords.lng.toFixed(5)}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openExternalMapUrl(
+                                buildTrackRiderMapUrl(
+                                  liveRiderCoords.lat,
+                                  liveRiderCoords.lng
+                                )
+                              )
+                            }
+                            className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors"
+                          >
+                            <Navigation className="w-4 h-4 shrink-0" aria-hidden="true" />
+                            <span>Track Rider on Map</span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Embedded Live Map when rider is active on the order */}
+                      {showEmbeddedMap && order.assignedRiderId ? (
                         <LiveOrderMap
                           orderId={order.id}
-                          customerLocation={order.customerLocation}
+                          customerLocation={customerCoords}
                           customerAddress={order.address}
-                          riderLocation={
-                            ridersMap[order.assignedRiderId]?.liveLocation ?? null
-                          }
+                          riderLocation={liveRiderCoords}
                           riderName={
                             order.assignedRiderName ||
                             ridersMap[order.assignedRiderId]?.name ||
                             'DailyDrop Rider'
                           }
                           riderId={order.assignedRiderId}
-                          riderMobile={
-                            order.assignedRiderMobile ||
-                            ridersMap[order.assignedRiderId]?.mobile ||
-                            null
-                          }
+                          riderMobile={riderMobile}
+                          showExternalTrackButton={isOutForDelivery}
+                          onCallFeedback={setOrderBanner}
                         />
                       ) : order.assignedRiderName ? (
                         <div className="my-3 rounded-xl bg-cyan-50 border border-cyan-200 p-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -1035,17 +1130,69 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                               {order.assignedRiderId ? ` (${order.assignedRiderId})` : ''}
                             </p>
                           </div>
-                          {riderTel && (
-                            <a
-                              href={`tel:${riderTel}`}
-                              className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm flex items-center gap-2 transition-colors"
+                          {riderE164 && riderMobile && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                triggerPhoneCall(riderMobile, setOrderBanner)
+                              }
+                              className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm flex items-center gap-2 transition-colors cursor-pointer"
                             >
                               <Phone className="w-4 h-4" aria-hidden="true" />
                               <span>Call Rider</span>
-                            </a>
+                            </button>
                           )}
                         </div>
                       ) : null}
+
+                      {/* Delivery Photo Proof when delivered */}
+                      {hasDeliveryPhoto && (
+                        <div className="my-3 rounded-xl bg-emerald-50 border border-emerald-200 p-3.5 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setZoomPhoto({
+                                  orderId: order.id,
+                                  src: order.deliveryPhoto!,
+                                })
+                              }
+                              aria-label={`View delivery proof photo for ${order.id}`}
+                              className="w-16 h-16 rounded-xl overflow-hidden border border-emerald-300 shrink-0 cursor-pointer hover:opacity-90"
+                            >
+                              <img
+                                src={order.deliveryPhoto!}
+                                alt={`Delivery proof for order ${order.id}`}
+                                className="w-full h-full object-cover"
+                              />
+                            </button>
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold text-emerald-900 flex items-center gap-1.5">
+                                <Camera className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                                <span>Delivery Photo Proof</span>
+                              </p>
+                              <p className="text-xs text-emerald-800 mt-0.5">
+                                Doorstep photo verified by your rider
+                                {order.deliveredAt
+                                  ? ` · ${formatTimestamp(order.deliveredAt)}`
+                                  : ''}
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setZoomPhoto({
+                                orderId: order.id,
+                                src: order.deliveryPhoto!,
+                              })
+                            }
+                            className="min-h-[38px] px-3 rounded-lg bg-white border border-emerald-300 text-emerald-900 text-xs font-bold shrink-0 cursor-pointer"
+                          >
+                            View Photo
+                          </button>
+                        </div>
+                      )}
 
                       {/* Items & Delivery Details */}
                       <div className="pt-3 border-t border-slate-100 text-sm text-slate-700 space-y-1.5">
@@ -1070,13 +1217,9 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                             </span>
                           </div>
                         )}
-                        <div className="text-xs text-slate-500 flex flex-wrap items-center gap-1.5">
-                          <span>Payment: {order.paymentMethod}</span>
-                          {order.paymentStatus === 'SUCCESSFUL' && (
-                            <span className="font-bold text-emerald-700">
-                              · UPI Verified (SUCCESSFUL)
-                            </span>
-                          )}
+                        <div className="text-xs text-slate-600 font-semibold flex items-center gap-1.5">
+                          <Banknote className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-hidden="true" />
+                          <span>Payment: {COD_DISPLAY_LABEL}</span>
                         </div>
                       </div>
                     </article>
@@ -1134,23 +1277,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
               type="button"
               onClick={() => {
                 setFormErrors({});
+                setLocationError(null);
                 setCheckoutOpen(true);
-                if (!customerLocation && 'geolocation' in navigator) {
-                  navigator.geolocation.getCurrentPosition(
-                    (pos) => {
-                      const coords: GeoPoint = {
-                        lat: Number(pos.coords.latitude.toFixed(6)),
-                        lng: Number(pos.coords.longitude.toFixed(6)),
-                      };
-                      setCustomerLocation(coords);
-                      setZoneResult(checkTolichowkiZone(coords.lat, coords.lng));
-                    },
-                    () => {
-                      // Non-blocking: customer can still tap Pin GPS or submit address
-                    },
-                    { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
-                  );
-                }
               }}
               className="min-h-[48px] px-6 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.98] text-white font-bold text-sm sm:text-base flex items-center gap-2 transition-all cursor-pointer"
             >
@@ -1169,7 +1297,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           aria-modal="true"
           aria-labelledby="checkout-heading"
         >
-          <div className="w-full sm:max-w-lg bg-white rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto shadow-xl">
+          <div className="w-full sm:max-w-lg bg-white rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto scroll-touch shadow-xl pb-safe">
             <div className="sticky top-0 bg-white border-b border-slate-200 px-5 py-4 flex items-center justify-between">
               <div>
                 <h2
@@ -1286,27 +1414,74 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   <p className="text-xs text-red-600 mt-1">{formErrors.address}</p>
                 )}
 
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 border border-slate-200 px-3 py-2">
-                  <span className="text-xs text-slate-600 font-medium">
-                    {customerLocation
-                      ? `Live map GPS pin saved (${customerLocation.lat.toFixed(4)}, ${customerLocation.lng.toFixed(4)})`
-                      : 'Pin your GPS for live door-to-door rider tracking'}
-                  </span>
+                {/* Mandatory GPS Location Capture */}
+                <div
+                  className={`mt-3 rounded-xl border p-3.5 space-y-2.5 ${
+                    hasValidGps
+                      ? 'bg-emerald-50 border-emerald-300'
+                      : 'bg-amber-50 border-amber-300'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p
+                        className={`text-xs font-bold flex items-center gap-1.5 ${
+                          hasValidGps ? 'text-emerald-900' : 'text-amber-950'
+                        }`}
+                      >
+                        <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        <span>
+                          {hasValidGps
+                            ? 'Current GPS Location Captured'
+                            : 'Current GPS Location Required'}
+                        </span>
+                      </p>
+                      {hasValidGps && customerLocation ? (
+                        <p className="text-xs text-emerald-800 tabular-nums mt-0.5">
+                          Coordinates: {customerLocation.lat.toFixed(5)},{' '}
+                          {customerLocation.lng.toFixed(5)}
+                          {zoneResult
+                            ? ` · ${zoneResult.formattedDistance} from Tolichowki`
+                            : ''}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-amber-900 font-semibold mt-0.5">
+                          {MISSING_GPS_MESSAGE}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
                   <button
                     type="button"
                     disabled={locating}
                     onClick={handleVerifyLocation}
-                    className="min-h-[34px] px-3 rounded-lg bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                    className={`w-full min-h-[46px] px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-60 ${
+                      hasValidGps
+                        ? 'bg-white border border-emerald-400 text-emerald-900 hover:bg-emerald-100'
+                        : 'bg-blue-700 hover:bg-blue-800 text-white'
+                    }`}
                   >
-                    <LocateFixed className="w-3.5 h-3.5 text-cyan-700" aria-hidden="true" />
+                    <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
                     <span>
                       {locating
-                        ? 'Locating…'
-                        : customerLocation
-                          ? 'Refresh GPS'
-                          : 'Pin My GPS'}
+                        ? 'Capturing Current GPS…'
+                        : hasValidGps
+                          ? 'Refresh Current Location'
+                          : 'Share Current Location'}
                     </span>
                   </button>
+
+                  {locationError && (
+                    <p role="alert" className="text-xs text-red-700 font-semibold">
+                      {locationError}
+                    </p>
+                  )}
+                  {formErrors.location && !hasValidGps && (
+                    <p role="alert" className="text-xs text-red-700 font-semibold">
+                      {formErrors.location}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -1404,28 +1579,23 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 </div>
               )}
 
-              {/* Payment Mode */}
+              {/* Payment Mode: Cash on Delivery Only */}
               <div>
                 <span className="block text-sm font-semibold text-slate-800 mb-1.5">
                   Payment Method
                 </span>
-                <div className="grid grid-cols-2 gap-2">
-                  {(['Cash on Delivery', 'UPI on Delivery'] as PaymentMethod[]).map(
-                    (method) => (
-                      <button
-                        key={method}
-                        type="button"
-                        onClick={() => setPaymentMethod(method)}
-                        className={`min-h-[44px] px-3 rounded-xl border text-xs sm:text-sm font-semibold transition-colors cursor-pointer ${
-                          paymentMethod === method
-                            ? 'bg-slate-900 border-slate-900 text-white'
-                            : 'bg-white border-slate-300 text-slate-700'
-                        }`}
-                      >
-                        {method}
-                      </button>
-                    )
-                  )}
+                <div className="rounded-xl bg-emerald-50 border border-emerald-300 px-4 py-3 flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                    <Banknote className="w-5 h-5" aria-hidden="true" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-emerald-950">
+                      {COD_DISPLAY_LABEL}
+                    </p>
+                    <p className="text-xs text-emerald-800">
+                      Pay {formatRupees(subtotal)} in cash when your water cans arrive.
+                    </p>
+                  </div>
                 </div>
               </div>
 
@@ -1435,19 +1605,63 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 </p>
               )}
 
-              <button
-                type="submit"
-                disabled={submittingOrder}
-                className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-base transition-all disabled:opacity-60 cursor-pointer"
-              >
-                {submittingOrder
-                  ? 'Placing Order…'
-                  : `Place Order · ${formatRupees(subtotal)}`}
-              </button>
+              {!hasValidGps && (
+                <p className="text-xs font-semibold text-amber-800 text-center">
+                  {MISSING_GPS_MESSAGE}
+                </p>
+              )}
+
+              <div className="pb-safe">
+                <button
+                  type="submit"
+                  disabled={submittingOrder || !hasValidGps}
+                  className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {submittingOrder
+                    ? 'Placing Order…'
+                    : `Place Order · ${formatRupees(subtotal)}`}
+                </button>
+              </div>
             </form>
           </div>
         </div>
       )}
+
+      {/* Delivery Photo Proof Lightbox */}
+      {zoomPhoto && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/75 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Delivery Photo Proof Preview"
+        >
+          <div className="w-full max-w-md bg-white rounded-2xl overflow-hidden shadow-xl">
+            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+              <div>
+                <p className="font-display font-bold text-slate-900">
+                  Delivery Photo Proof
+                </p>
+                <p className="text-xs text-slate-500">Order {zoomPhoto.orderId}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setZoomPhoto(null)}
+                aria-label="Close delivery photo"
+                className="min-w-[40px] min-h-[40px] rounded-lg hover:bg-slate-100 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <img
+              src={zoomPhoto.src}
+              alt={`Delivery proof for order ${zoomPhoto.orderId}`}
+              className="w-full max-h-[70dvh] object-contain bg-slate-100"
+            />
+          </div>
+        </div>
+      )}
+
+      <BackExitToast visible={exitPromptVisible} />
     </div>
   );
 }

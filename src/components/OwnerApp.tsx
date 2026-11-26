@@ -27,10 +27,14 @@ import {
   updateOwnerPassword,
   verifyOwnerPassword,
 } from '../services/firebaseDb';
-import { getCompletedOrdersForCleanup } from '../utils/domain';
+import {
+  getCompletedOrdersForCleanup,
+} from '../utils/domain';
+import { isOwnerAlertOrder } from '../utils/orderTimer';
 import {
   getCustomRingtoneInfo,
   installGlobalAudioUnlock,
+  playShortTestChime,
   resetCustomRingtone,
   saveCustomRingtoneFile,
   startOrderAlertLoop,
@@ -40,6 +44,8 @@ import {
   type CustomRingtoneInfo,
 } from '../utils/sound';
 import { BrandLogo } from './BrandLogo';
+import { BackExitToast } from './BackExitToast';
+import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 import { LiveOrdersTab } from './owner/LiveOrdersTab';
 import { RidersTab } from './owner/RidersTab';
 import { StockTab } from './owner/StockTab';
@@ -119,7 +125,9 @@ export function OwnerApp() {
           : [];
 
         const currentPendingIds = new Set(
-          list.filter((o) => o.status === 'PENDING').map((o) => o.id)
+          list
+            .filter((o) => isOwnerAlertOrder(o))
+            .map((o) => o.id)
         );
 
         // Prune manually silenced IDs that are no longer PENDING
@@ -317,8 +325,23 @@ export function OwnerApp() {
     }
   };
 
-  const pendingCount = orders.filter((o) => o.status === 'PENDING').length;
+  const pendingCount = orders.filter((o) => isOwnerAlertOrder(o)).length;
   const completedOrdersForCleanup = getCompletedOrdersForCleanup(orders);
+
+  // Prevent accidental app exit on Android hardware/gesture Back button
+  const { exitPromptVisible } = useAndroidBackGuard({
+    scope: 'owner',
+    hasOpenOverlay: Boolean(cleanupModalOpen || settingsOpen),
+    onCloseOverlay: () => {
+      if (cleanupModalOpen) {
+        setCleanupModalOpen(false);
+      } else if (settingsOpen) {
+        setSettingsOpen(false);
+      }
+    },
+    isOnSubView: authenticated && activeTab !== 'orders',
+    onReturnHome: () => setActiveTab('orders'),
+  });
 
   const handleConfirmWeeklyCleanup = async () => {
     setCleaningUp(true);
@@ -353,7 +376,7 @@ export function OwnerApp() {
   // OWNER LOGIN SCREEN
   if (!authenticated) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col">
+      <div className="app-scroll-page min-h-screen bg-slate-50 flex flex-col pb-safe">
         <header className="bg-slate-900 text-white px-4 sm:px-6 py-5">
           <div className="max-w-md mx-auto flex items-center gap-3">
             <BrandLogo size="md" />
@@ -418,6 +441,7 @@ export function OwnerApp() {
             </form>
           </div>
         </main>
+        <BackExitToast visible={exitPromptVisible} />
       </div>
     );
   }
@@ -435,7 +459,7 @@ export function OwnerApp() {
   ];
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-12">
+    <div className="app-scroll-page bg-slate-50 pb-safe-page">
       {/* Owner Header */}
       <header className="sticky top-0 z-30 bg-slate-900 text-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
@@ -516,7 +540,56 @@ export function OwnerApp() {
         </div>
       </header>
 
-      {/* Active Ringing Banner when a new PENDING order is looping */}
+      {/* Clear Top Audio Unlock Bar ("Order Alert Sound: ON" + "Mute Alert") */}
+      <div className="bg-slate-800 text-white border-b border-slate-700">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            data-testid="owner-alert-sound-btn"
+            onClick={() => {
+              unlockAudioContext();
+              setSoundEnabled(true);
+              silencedPendingIdsRef.current.clear();
+              playShortTestChime('owner');
+              if (knownPendingIdsRef.current.size > 0) {
+                startOrderAlertLoop();
+                setIsRinging(true);
+              }
+              setToast(
+                'Order Alert Sound is ON — audio unlocked for incoming & unassigned order alerts.'
+              );
+            }}
+            className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors ${
+              soundEnabled
+                ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                : 'bg-slate-700 hover:bg-slate-600 text-white'
+            }`}
+          >
+            {soundEnabled ? (
+              <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+            ) : (
+              <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
+            )}
+            <span>
+              {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              handleStopRinging();
+              setToast('Order alert muted for current pending orders.');
+            }}
+            className="min-h-[38px] px-3 rounded-xl bg-slate-900 hover:bg-slate-950 border border-slate-700 text-slate-100 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <BellOff className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            <span>Mute Alert</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Active Ringing Banner when a new PENDING or timed-out UNASSIGNED order is looping */}
       {isRinging && (
         <div
           role="alert"
@@ -528,7 +601,7 @@ export function OwnerApp() {
               <span>
                 Order Alert Ringing ({ringtoneInfo.name})
                 {pendingCount > 0
-                  ? ` · ${pendingCount} pending ${pendingCount === 1 ? 'order' : 'orders'} waiting`
+                  ? ` · ${pendingCount} ${pendingCount === 1 ? 'order' : 'orders'} waiting`
                   : ''}
               </span>
             </div>
@@ -538,7 +611,7 @@ export function OwnerApp() {
               className="min-h-[40px] px-4 rounded-xl bg-white text-blue-900 hover:bg-cyan-50 font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
             >
               <BellOff className="w-4 h-4" aria-hidden="true" />
-              <span>Stop Ringtone</span>
+              <span>Mute Alert</span>
             </button>
           </div>
         </div>
@@ -639,7 +712,7 @@ export function OwnerApp() {
           aria-modal="true"
           aria-labelledby="owner-settings-title"
         >
-          <div className="w-full sm:max-w-lg bg-white rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto shadow-xl">
+          <div className="w-full sm:max-w-lg bg-white rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto scroll-touch shadow-xl pb-safe">
             <div className="sticky top-0 bg-white px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <h2
                 id="owner-settings-title"
@@ -809,7 +882,7 @@ export function OwnerApp() {
                 <p className="text-xs text-slate-600 leading-relaxed">
                   Permanently deletes all <strong>DELIVERED</strong> and{' '}
                   <strong>REJECTED</strong> orders (including customer names, mobile
-                  numbers, addresses, and payment screenshots) from Firebase{' '}
+                  numbers, addresses, and delivery proof photos) from Firebase{' '}
                   <code className="font-mono">/orders</code> and clears inactive
                   customer records, while keeping product stock, rider accounts, active
                   orders, and settings safe.
@@ -838,7 +911,7 @@ export function OwnerApp() {
           aria-modal="true"
           aria-labelledby="weekly-cleanup-title"
         >
-          <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-xl">
+          <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto scroll-touch shadow-xl pb-safe">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <h2
                 id="weekly-cleanup-title"
@@ -868,16 +941,16 @@ export function OwnerApp() {
                 </p>
                 <p className="text-xs text-red-800 leading-relaxed">
                   This removes customer names, mobile numbers, delivery locations, and
-                  payment screenshots from Firebase <code className="font-mono">/orders</code>{' '}
+                  delivery proof photos from Firebase <code className="font-mono">/orders</code>{' '}
                   (and wipes inactive customer entries) in line with DailyDrop Water&apos;s
                   7-day deletion policy.
                 </p>
               </div>
 
               <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3.5 text-xs text-emerald-900 font-medium leading-relaxed">
-                <strong>Safe &amp; Untouched:</strong> Active orders (Pending, Accepted,
-                Out for Delivery), product catalog &amp; stock, rider accounts, and Owner
-                settings will NOT be modified.
+                <strong>Safe &amp; Untouched:</strong> Active orders (Order Placed, Rider
+                Accepted, Reached Plant, Out for Delivery), product catalog &amp; stock,
+                rider accounts, and Owner settings will NOT be modified.
               </div>
 
               <div className="grid grid-cols-2 gap-2.5 pt-1">
@@ -903,6 +976,8 @@ export function OwnerApp() {
           </div>
         </div>
       )}
+
+      <BackExitToast visible={exitPromptVisible} />
     </div>
   );
 }

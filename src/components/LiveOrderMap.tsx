@@ -9,7 +9,12 @@ import {
   isValidGeoPoint,
   TOLICHOWKI_CENTER,
 } from '../utils/geo';
-import { sanitizePhoneForTel } from '../utils/domain';
+import {
+  buildTrackRiderMapUrl,
+  formatIndianPhoneE164,
+  openExternalMapUrl,
+  triggerPhoneCall,
+} from '../utils/androidIntents';
 import {
   createHomePinIcon,
   createScooterPinIcon,
@@ -31,6 +36,8 @@ interface LiveOrderMapProps {
   riderName: string;
   riderId?: string | null;
   riderMobile?: string | null;
+  showExternalTrackButton?: boolean;
+  onCallFeedback?: (msg: string) => void;
 }
 
 export function LiveOrderMap({
@@ -41,6 +48,8 @@ export function LiveOrderMap({
   riderName,
   riderId,
   riderMobile,
+  showExternalTrackButton = false,
+  onCallFeedback,
 }: LiveOrderMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const leafletRef = useRef<LeafletStatic | null>(null);
@@ -231,7 +240,11 @@ export function LiveOrderMap({
     }
   };
 
-  const riderTel = riderMobile ? sanitizePhoneForTel(riderMobile) : '';
+  const riderE164 = riderMobile ? formatIndianPhoneE164(riderMobile) : '';
+  const trackRiderUrl =
+    hasRiderGps && riderLocation
+      ? buildTrackRiderMapUrl(riderLocation.lat, riderLocation.lng)
+      : '';
 
   return (
     <div
@@ -268,7 +281,7 @@ export function LiveOrderMap({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={handleRecenter}
@@ -279,14 +292,26 @@ export function LiveOrderMap({
             <span>Center</span>
           </button>
 
-          {riderTel && (
-            <a
-              href={`tel:${riderTel}`}
-              className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors"
+          {showExternalTrackButton && trackRiderUrl && (
+            <button
+              type="button"
+              onClick={() => openExternalMapUrl(trackRiderUrl)}
+              className="min-h-[42px] px-3.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-blue-950 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Navigation className="w-4 h-4" aria-hidden="true" />
+              <span>Track Rider on Map</span>
+            </button>
+          )}
+
+          {riderE164 && (
+            <button
+              type="button"
+              onClick={() => triggerPhoneCall(riderMobile!, onCallFeedback)}
+              className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <Phone className="w-4 h-4" aria-hidden="true" />
               <span>Call Rider</span>
-            </a>
+            </button>
           )}
         </div>
       </div>
