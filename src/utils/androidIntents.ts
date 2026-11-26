@@ -6,19 +6,22 @@ export const WATER_PLANT_LOCATION = {
   label: 'DailyDrop Water Plant, Tolichowki',
 } as const;
 
-export function isAndroidUserAgent(ua?: string): boolean {
-  const agent =
-    typeof ua === 'string'
-      ? ua
-      : typeof navigator !== 'undefined'
-        ? navigator.userAgent
-        : '';
-  return /android/i.test(agent);
+/**
+ * Extracts a clean 10-digit Indian mobile number for clear display when available.
+ */
+export function formatDisplayPhone10(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('91')) {
+    return digits.slice(2);
+  }
+  if (digits.length === 11 && digits.startsWith('0')) {
+    return digits.slice(1);
+  }
+  return digits || phone.trim();
 }
 
 /**
- * Normalizes Indian mobile numbers to E.164 (+91XXXXXXXXXX) for reliable
- * Android Telecom Intents and dialer links.
+ * Normalizes Indian mobile numbers to E.164 (+91XXXXXXXXXX) for simple tel: links.
  */
 export function formatIndianPhoneE164(phone: string): string {
   const trimmed = phone.trim();
@@ -37,116 +40,87 @@ export function formatIndianPhoneE164(phone: string): string {
 }
 
 /**
- * Builds an Android WebView-safe phone call URL (using Android Telecom Intent
- * on Android to prevent ERR_UNKNOWN_URL_SCHEME, and tel: on other platforms).
+ * Builds a standard tel:+91XXXXXXXXXX URL (zero intent:// schemes so MIT App Inventor
+ * Android WebView never hits net::ERR_UNKNOWN_URL_SCHEME).
  */
-export function buildPhoneCallUrl(phone: string, ua?: string): string {
+export function buildPhoneCallUrl(phone: string): string {
   const e164 = formatIndianPhoneE164(phone);
   if (!e164) return '';
-  if (isAndroidUserAgent(ua)) {
-    return `intent://${e164}#Intent;scheme=tel;package=com.android.server.telecom;end`;
-  }
   return `tel:${e164}`;
 }
 
 /**
- * Builds a Google Maps turn-by-turn navigation URL to exact GPS coordinates
- * using an Android Intent URL on Android WebView (no ERR_UNKNOWN_URL_SCHEME).
+ * Builds a standard HTTPS Google Maps turn-by-turn navigation URL to exact GPS coordinates.
  */
-export function buildMapsDirectionsUrl(
-  lat: number,
-  lng: number,
-  ua?: string
-): string {
+export function buildMapsDirectionsUrl(lat: number, lng: number): string {
   const fixedLat = Number(lat).toFixed(6);
   const fixedLng = Number(lng).toFixed(6);
-  if (isAndroidUserAgent(ua)) {
-    return `intent://maps.google.com/maps?daddr=${fixedLat},${fixedLng}#Intent;scheme=https;package=com.google.android.apps.maps;end`;
-  }
   return `https://www.google.com/maps/dir/?api=1&destination=${fixedLat},${fixedLng}`;
 }
 
 /**
- * Builds a Google Maps pin URL to view the Rider's live GPS location
- * using an Android Intent URL on Android WebView.
+ * Builds a standard HTTPS Google Maps directions URL using a destination street address
+ * when GPS coordinates are unavailable (address_only orders).
  */
-export function buildTrackRiderMapUrl(
-  lat: number,
-  lng: number,
-  ua?: string
-): string {
+export function buildMapsDirectionsByAddressUrl(address: string): string {
+  const cleaned = address.trim();
+  const query = cleaned.toLowerCase().includes('tolichowki')
+    ? `${cleaned}, Hyderabad`
+    : `${cleaned}, Tolichowki, Hyderabad`;
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(query)}`;
+}
+
+/**
+ * Builds a standard HTTPS Google Maps pin URL to view the Rider's live GPS location.
+ */
+export function buildTrackRiderMapUrl(lat: number, lng: number): string {
   const fixedLat = Number(lat).toFixed(6);
   const fixedLng = Number(lng).toFixed(6);
-  if (isAndroidUserAgent(ua)) {
-    return `intent://maps.google.com/maps?q=${fixedLat},${fixedLng}#Intent;scheme=https;package=com.google.android.apps.maps;end`;
-  }
-  return `https://maps.google.com/?q=${fixedLat},${fixedLng}`;
+  return `https://www.google.com/maps/search/?api=1&query=${fixedLat},${fixedLng}`;
 }
 
 /**
- * Copies a phone number to clipboard safely (best-effort) and returns whether
- * clipboard write succeeded.
+ * Copies a phone number reliably across desktop browsers and MIT App Inventor WebViews
+ * using navigator.clipboard with an automatic textarea execCommand('copy') fallback,
+ * then triggers the "Number copied!" toast callback.
  */
-async function copyPhoneFallback(e164: string): Promise<boolean> {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(e164);
-      return true;
-    }
-  } catch {
-    // ignore clipboard errors in restricted WebViews
-  }
-  return false;
-}
-
-/**
- * Triggers a phone call safely across Android WebView and desktop browsers,
- * while copying the normalized number to clipboard as a reliable fallback.
- */
-export function triggerPhoneCall(
+export async function copyPhoneNumber(
   phone: string,
   onFeedback?: (message: string) => void
-): void {
-  const e164 = formatIndianPhoneE164(phone);
-  if (!e164) return;
+): Promise<boolean> {
+  const textToCopy = formatDisplayPhone10(phone) || phone.trim();
+  if (!textToCopy) return false;
 
-  const url = buildPhoneCallUrl(phone);
-  void copyPhoneFallback(e164).then((copied) => {
-    if (onFeedback) {
-      onFeedback(
-        copied
-          ? `Dialing ${e164} · Number copied to clipboard`
-          : `Dialing ${e164}`
-      );
+  let copied = false;
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(textToCopy);
+      copied = true;
     }
-  });
+  } catch {
+    copied = false;
+  }
 
-  if (typeof window !== 'undefined' && url) {
+  if (!copied && typeof document !== 'undefined') {
     try {
-      window.location.href = url;
+      const textarea = document.createElement('textarea');
+      textarea.value = textToCopy;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '-9999px';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      copied = document.execCommand('copy');
+      document.body.removeChild(textarea);
     } catch {
-      if (onFeedback) {
-        onFeedback(`Number copied: ${e164}`);
-      }
+      copied = false;
     }
   }
-}
 
-/**
- * Opens Google Maps navigation or rider tracking safely in Android WebView
- * (via intent://) or standard browser link without triggering popup blockers.
- */
-export function openExternalMapUrl(url: string): void {
-  if (!url || typeof window === 'undefined') return;
-  if (url.startsWith('intent://')) {
-    window.location.href = url;
-    return;
+  if (onFeedback) {
+    onFeedback('Number copied!');
   }
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.target = '_blank';
-  anchor.rel = 'noopener noreferrer';
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
+  return copied;
 }

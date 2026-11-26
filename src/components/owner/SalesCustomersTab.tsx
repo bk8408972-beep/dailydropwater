@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Phone, Trash2 } from 'lucide-react';
+import { Copy, Phone, Trash2 } from 'lucide-react';
 import type { CustomerRecord, Order } from '../../types';
 import { dbDelete, sanitizeFirebaseKey } from '../../services/firebaseDb';
 import {
@@ -7,7 +7,11 @@ import {
   formatRupees,
   formatTimestamp,
 } from '../../utils/domain';
-import { triggerPhoneCall } from '../../utils/androidIntents';
+import {
+  buildPhoneCallUrl,
+  copyPhoneNumber,
+  formatDisplayPhone10,
+} from '../../utils/androidIntents';
 
 interface SalesCustomersTabProps {
   orders: Order[];
@@ -127,14 +131,23 @@ export function SalesCustomersTab({
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => triggerPhoneCall(customer.mobile, onNotify)}
-                      className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <a
+                      href={buildPhoneCallUrl(customer.mobile)}
+                      className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold flex items-center gap-1.5 transition-colors"
                     >
                       <Phone className="w-3.5 h-3.5" aria-hidden="true" />
-                      <span>Call</span>
+                      <span>Call {formatDisplayPhone10(customer.mobile)}</span>
+                    </a>
+
+                    <button
+                      type="button"
+                      onClick={() => void copyPhoneNumber(customer.mobile, onNotify)}
+                      aria-label={`Copy phone number for ${customer.name}`}
+                      className="min-h-[42px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <Copy className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+                      <span>Copy Number</span>
                     </button>
 
                     {confirmDeleteMobile === customer.mobile ? (

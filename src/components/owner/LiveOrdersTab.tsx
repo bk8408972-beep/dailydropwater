@@ -5,6 +5,7 @@ import {
   Camera,
   Check,
   Clock,
+  Copy,
   MapPin,
   Phone,
   RefreshCw,
@@ -33,7 +34,11 @@ import {
   isOrderTimedOutUnassigned,
   shouldAutoUnassignOrder,
 } from '../../utils/orderTimer';
-import { triggerPhoneCall } from '../../utils/androidIntents';
+import {
+  buildPhoneCallUrl,
+  copyPhoneNumber,
+  formatDisplayPhone10,
+} from '../../utils/androidIntents';
 
 const OWNER_STEPS = [
   { key: 'pending', label: 'Placed' },
@@ -399,21 +404,36 @@ export function LiveOrdersTab({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                      <a
+                        href={buildPhoneCallUrl(order.customerMobile)}
+                        className="inline-flex items-center gap-1.5 min-h-[36px] px-2.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 font-bold text-blue-800 tabular-nums transition-colors"
+                      >
+                        <Phone className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>Call {formatDisplayPhone10(order.customerMobile)}</span>
+                      </a>
+
                       <button
                         type="button"
                         onClick={() =>
-                          triggerPhoneCall(order.customerMobile, onNotify)
+                          void copyPhoneNumber(order.customerMobile, onNotify)
                         }
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 font-bold text-blue-800 tabular-nums cursor-pointer"
+                        aria-label={`Copy phone number ${formatDisplayPhone10(order.customerMobile)}`}
+                        className="inline-flex items-center gap-1.5 min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-bold text-slate-800 cursor-pointer transition-colors"
                       >
-                        <Phone className="w-3.5 h-3.5" aria-hidden="true" />
-                        <span>Call {order.customerMobile}</span>
+                        <Copy className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+                        <span>Copy Number</span>
                       </button>
 
                       <span className="inline-flex items-center gap-1 font-semibold text-emerald-800">
                         <Banknote className="w-3.5 h-3.5 text-emerald-700" aria-hidden="true" />
                         <span>{COD_DISPLAY_LABEL}</span>
                       </span>
+
+                      {order.gpsStatus === 'address_only' && (
+                        <span className="text-[11px] font-semibold text-slate-500">
+                          · Address-only
+                        </span>
+                      )}
                     </div>
 
                     <div className="bg-slate-50 rounded-xl p-3 text-sm font-medium text-slate-900">

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Crosshair, MapPin, Navigation, Phone } from 'lucide-react';
+import { Copy, Crosshair, MapPin, Navigation, Phone } from 'lucide-react';
 import type { GeoPoint, RiderLiveLocation } from '../types';
 import {
   calculateHaversineKm,
@@ -10,10 +10,11 @@ import {
   TOLICHOWKI_CENTER,
 } from '../utils/geo';
 import {
+  buildPhoneCallUrl,
   buildTrackRiderMapUrl,
+  copyPhoneNumber,
+  formatDisplayPhone10,
   formatIndianPhoneE164,
-  openExternalMapUrl,
-  triggerPhoneCall,
 } from '../utils/androidIntents';
 import {
   createHomePinIcon,
@@ -293,25 +294,35 @@ export function LiveOrderMap({
           </button>
 
           {showExternalTrackButton && trackRiderUrl && (
-            <button
-              type="button"
-              onClick={() => openExternalMapUrl(trackRiderUrl)}
-              className="min-h-[42px] px-3.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-blue-950 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+            <a
+              href={trackRiderUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="min-h-[42px] px-3.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-blue-950 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors"
             >
               <Navigation className="w-4 h-4" aria-hidden="true" />
               <span>Track Rider on Map</span>
-            </button>
+            </a>
           )}
 
-          {riderE164 && (
-            <button
-              type="button"
-              onClick={() => triggerPhoneCall(riderMobile!, onCallFeedback)}
-              className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <Phone className="w-4 h-4" aria-hidden="true" />
-              <span>Call Rider</span>
-            </button>
+          {riderE164 && riderMobile && (
+            <>
+              <a
+                href={buildPhoneCallUrl(riderMobile)}
+                className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-colors"
+              >
+                <Phone className="w-4 h-4" aria-hidden="true" />
+                <span>Call Rider ({formatDisplayPhone10(riderMobile)})</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => void copyPhoneNumber(riderMobile, onCallFeedback)}
+                className="min-h-[42px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+                <span>Copy Number</span>
+              </button>
+            </>
           )}
         </div>
       </div>

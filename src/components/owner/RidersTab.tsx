@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   Camera,
+  Copy,
   MapPin,
   Phone,
   Plus,
@@ -22,7 +23,11 @@ import {
   isSafeImageDataUrl,
 } from '../../utils/domain';
 import { formatRelativeTime, isValidGeoPoint } from '../../utils/geo';
-import { triggerPhoneCall } from '../../utils/androidIntents';
+import {
+  buildPhoneCallUrl,
+  copyPhoneNumber,
+  formatDisplayPhone10,
+} from '../../utils/androidIntents';
 import { LiveFleetMap } from './LiveFleetMap';
 
 interface RidersTabProps {
@@ -338,13 +343,22 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
                           <span>Focus Map</span>
                         </button>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => triggerPhoneCall(rider.mobile, onNotify)}
-                        className="min-h-[40px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                      <a
+                        href={buildPhoneCallUrl(rider.mobile)}
+                        className="min-h-[40px] px-3 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold tabular-nums flex items-center gap-1.5 transition-colors"
                       >
                         <Phone className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
-                        <span>Call</span>
+                        <span>Call {formatDisplayPhone10(rider.mobile)}</span>
+                      </a>
+
+                      <button
+                        type="button"
+                        onClick={() => void copyPhoneNumber(rider.mobile, onNotify)}
+                        aria-label={`Copy phone number for ${rider.name}`}
+                        className="min-h-[40px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                      >
+                        <Copy className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+                        <span>Copy Number</span>
                       </button>
 
                       <button

@@ -6,6 +6,7 @@ import {
   Camera,
   CheckCircle2,
   Clock,
+  Copy,
   LocateFixed,
   MapPin,
   Minus,
@@ -46,7 +47,6 @@ import {
   getStatusLabel,
   isActiveOrderStatus,
   isSafeImageDataUrl,
-  MISSING_GPS_MESSAGE,
   normalizeOrderStatus,
   PRODUCT_CATEGORIES,
   resolveOrderCustomerCoords,
@@ -61,10 +61,11 @@ import {
   type ZoneCheckResult,
 } from '../utils/geo';
 import {
+  buildPhoneCallUrl,
   buildTrackRiderMapUrl,
+  copyPhoneNumber,
+  formatDisplayPhone10,
   formatIndianPhoneE164,
-  openExternalMapUrl,
-  triggerPhoneCall,
 } from '../utils/androidIntents';
 import {
   installGlobalAudioUnlock,
@@ -76,6 +77,7 @@ import { BrandLogo } from './BrandLogo';
 import { LiveOrderMap } from './LiveOrderMap';
 import { PWAInstallButton } from './PWAInstallButton';
 import { BackExitToast } from './BackExitToast';
+import { CopyToast } from './CopyToast';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 
 const CUSTOMER_MOBILE_KEY = 'dailydrop_customer_mobile';
@@ -127,9 +129,21 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [submittingOrder, setSubmittingOrder] = useState(false);
   const [orderBanner, setOrderBanner] = useState<string | null>(null);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
   const [zoomPhoto, setZoomPhoto] = useState<{ orderId: string; src: string } | null>(
     null
   );
+  const copyToastTimerRef = useRef<number | null>(null);
+
+  const showCopyToast = (msg: string) => {
+    setCopyToast(msg);
+    if (copyToastTimerRef.current !== null) {
+      window.clearTimeout(copyToastTimerRef.current);
+    }
+    copyToastTimerRef.current = window.setTimeout(() => {
+      setCopyToast(null);
+    }, 2200);
+  };
 
   // Orders & Riders live tracking
   const [allOrders, setAllOrders] = useState<Order[]>([]);
@@ -349,6 +363,36 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   };
 
   const hasValidGps = isValidGeoPoint(customerLocation);
+  const hasRequiredCheckoutFields =
+    customerName.trim().length >= 2 &&
+    /^\d{10}$/.test(customerMobile.replace(/\D/g, '')) &&
+    address.trim().length >= 8 &&
+    (serviceMode !== 'events' || Boolean(eventDate.trim() && timeSlot.trim()));
+
+  // Silently attempt automatic optional GPS capture when checkout opens (never blocks order if WebView denies GPS)
+  useEffect(() => {
+    if (!checkoutOpen || hasValidGps || locating) return;
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
+    let active = true;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (!active) return;
+        const coords: GeoPoint = {
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6)),
+        };
+        setCustomerLocation(coords);
+        setZoneResult(checkTolichowkiZone(coords.lat, coords.lng));
+      },
+      () => {
+        // Optional GPS failed/denied in WebView — proceed seamlessly with address-only checkout
+      },
+      { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
+    );
+    return () => {
+      active = false;
+    };
+  }, [checkoutOpen, hasValidGps, locating]);
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -365,7 +409,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       itemCount,
     });
     setFormErrors(errors);
-    if (Object.keys(errors).length > 0 || !customerLocation) return;
+    if (Object.keys(errors).length > 0) return;
 
     const cleanMobile = sanitizeFirebaseKey(customerMobile.replace(/\D/g, ''));
     const productMap = new Map(products.map((p) => [p.id, p]));
@@ -401,9 +445,10 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         customerName: customerName.trim(),
         customerMobile: cleanMobile,
         address: address.trim(),
-        customerLat: customerLocation.lat,
-        customerLng: customerLocation.lng,
-        customerLocation,
+        customerLat: customerLocation ? customerLocation.lat : null,
+        customerLng: customerLocation ? customerLocation.lng : null,
+        customerLocation: customerLocation ?? null,
+        gpsStatus: customerLocation ? 'captured' : 'address_only',
         ownerApproved: false,
         serviceMode,
         eventDetails:
@@ -1072,7 +1117,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                         </div>
                       )}
 
-                      {/* Prominent "Track Rider on Map" button during out_for_delivery */}
+                      {/* Prominent "Track Rider on Map" HTTPS link during out_for_delivery */}
                       {isOutForDelivery && liveRiderCoords && (
                         <div className="mb-3 rounded-xl bg-blue-50 border border-blue-200 p-3.5 flex flex-wrap items-center justify-between gap-3">
                           <div className="min-w-0">
@@ -1084,21 +1129,18 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                               {liveRiderCoords.lng.toFixed(5)}
                             </p>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              openExternalMapUrl(
-                                buildTrackRiderMapUrl(
-                                  liveRiderCoords.lat,
-                                  liveRiderCoords.lng
-                                )
-                              )
-                            }
-                            className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors"
+                          <a
+                            href={buildTrackRiderMapUrl(
+                              liveRiderCoords.lat,
+                              liveRiderCoords.lng
+                            )}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-2 transition-colors"
                           >
                             <Navigation className="w-4 h-4 shrink-0" aria-hidden="true" />
                             <span>Track Rider on Map</span>
-                          </button>
+                          </a>
                         </div>
                       )}
 
@@ -1117,7 +1159,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                           riderId={order.assignedRiderId}
                           riderMobile={riderMobile}
                           showExternalTrackButton={isOutForDelivery}
-                          onCallFeedback={setOrderBanner}
+                          onCallFeedback={showCopyToast}
                         />
                       ) : order.assignedRiderName ? (
                         <div className="my-3 rounded-xl bg-cyan-50 border border-cyan-200 p-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -1129,18 +1171,32 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                               {order.assignedRiderName}
                               {order.assignedRiderId ? ` (${order.assignedRiderId})` : ''}
                             </p>
+                            {riderMobile && (
+                              <p className="text-xs font-semibold text-slate-700 tabular-nums mt-0.5">
+                                Mobile: {formatDisplayPhone10(riderMobile)}
+                              </p>
+                            )}
                           </div>
                           {riderE164 && riderMobile && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                triggerPhoneCall(riderMobile, setOrderBanner)
-                              }
-                              className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm flex items-center gap-2 transition-colors cursor-pointer"
-                            >
-                              <Phone className="w-4 h-4" aria-hidden="true" />
-                              <span>Call Rider</span>
-                            </button>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <a
+                                href={buildPhoneCallUrl(riderMobile)}
+                                className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm flex items-center gap-2 transition-colors"
+                              >
+                                <Phone className="w-4 h-4" aria-hidden="true" />
+                                <span>Call Rider ({formatDisplayPhone10(riderMobile)})</span>
+                              </a>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void copyPhoneNumber(riderMobile, showCopyToast)
+                                }
+                                className="min-h-[44px] px-3.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 font-semibold text-xs sm:text-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+                              >
+                                <Copy className="w-4 h-4 text-blue-700" aria-hidden="true" />
+                                <span>Copy Number</span>
+                              </button>
+                            </div>
                           )}
                         </div>
                       ) : null}
@@ -1414,26 +1470,26 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   <p className="text-xs text-red-600 mt-1">{formErrors.address}</p>
                 )}
 
-                {/* Mandatory GPS Location Capture */}
+                {/* Optional GPS Location Capture (never blocks checkout in WebView) */}
                 <div
                   className={`mt-3 rounded-xl border p-3.5 space-y-2.5 ${
                     hasValidGps
                       ? 'bg-emerald-50 border-emerald-300'
-                      : 'bg-amber-50 border-amber-300'
+                      : 'bg-blue-50/70 border-blue-200'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p
                         className={`text-xs font-bold flex items-center gap-1.5 ${
-                          hasValidGps ? 'text-emerald-900' : 'text-amber-950'
+                          hasValidGps ? 'text-emerald-900' : 'text-blue-950'
                         }`}
                       >
                         <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
                         <span>
                           {hasValidGps
                             ? 'Current GPS Location Captured'
-                            : 'Current GPS Location Required'}
+                            : 'GPS Location (Optional — Helps Faster Delivery)'}
                         </span>
                       </p>
                       {hasValidGps && customerLocation ? (
@@ -1445,8 +1501,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                             : ''}
                         </p>
                       ) : (
-                        <p className="text-xs text-amber-900 font-semibold mt-0.5">
-                          {MISSING_GPS_MESSAGE}
+                        <p className="text-xs text-blue-900 mt-0.5">
+                          Share your GPS pin if available, or place your order directly using your written address.
                         </p>
                       )}
                     </div>
@@ -1459,7 +1515,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                     className={`w-full min-h-[46px] px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-60 ${
                       hasValidGps
                         ? 'bg-white border border-emerald-400 text-emerald-900 hover:bg-emerald-100'
-                        : 'bg-blue-700 hover:bg-blue-800 text-white'
+                        : 'bg-white border border-blue-300 text-blue-800 hover:bg-blue-100'
                     }`}
                   >
                     <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -1473,13 +1529,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   </button>
 
                   {locationError && (
-                    <p role="alert" className="text-xs text-red-700 font-semibold">
-                      {locationError}
-                    </p>
-                  )}
-                  {formErrors.location && !hasValidGps && (
-                    <p role="alert" className="text-xs text-red-700 font-semibold">
-                      {formErrors.location}
+                    <p role="status" className="text-xs text-amber-800 font-medium">
+                      {locationError} You can still place your order using your address.
                     </p>
                   )}
                 </div>
@@ -1605,16 +1656,10 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 </p>
               )}
 
-              {!hasValidGps && (
-                <p className="text-xs font-semibold text-amber-800 text-center">
-                  {MISSING_GPS_MESSAGE}
-                </p>
-              )}
-
               <div className="pb-safe">
                 <button
                   type="submit"
-                  disabled={submittingOrder || !hasValidGps}
+                  disabled={submittingOrder || !hasRequiredCheckoutFields}
                   className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {submittingOrder
@@ -1661,6 +1706,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         </div>
       )}
 
+      <CopyToast message={copyToast} />
       <BackExitToast visible={exitPromptVisible} />
     </div>
   );

@@ -7,6 +7,7 @@ import {
   Camera,
   CheckCircle2,
   Clock,
+  Copy,
   LogOut,
   MapPin,
   Music,
@@ -31,7 +32,6 @@ import {
   subscribePath,
 } from '../services/firebaseDb';
 import {
-  buildGoogleMapsUrl,
   COD_DISPLAY_LABEL,
   formatRupees,
   formatTimestamp,
@@ -48,9 +48,11 @@ import {
 } from '../utils/orderTimer';
 import { formatRelativeTime } from '../utils/geo';
 import {
+  buildMapsDirectionsByAddressUrl,
   buildMapsDirectionsUrl,
-  openExternalMapUrl,
-  triggerPhoneCall,
+  buildPhoneCallUrl,
+  copyPhoneNumber,
+  formatDisplayPhone10,
   WATER_PLANT_LOCATION,
 } from '../utils/androidIntents';
 import { compressDeliveryPhotoFile } from '../utils/imageCompress';
@@ -68,6 +70,7 @@ import {
 } from '../utils/sound';
 import { BrandLogo } from './BrandLogo';
 import { BackExitToast } from './BackExitToast';
+import { CopyToast } from './CopyToast';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 
 const RIDER_WORKFLOW_STEPS = [
@@ -95,6 +98,18 @@ export function RiderApp() {
     {}
   );
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
+  const copyToastTimerRef = useRef<number | null>(null);
+
+  const showCopyToast = (msg: string) => {
+    setCopyToast(msg);
+    if (copyToastTimerRef.current !== null) {
+      window.clearTimeout(copyToastTimerRef.current);
+    }
+    copyToastTimerRef.current = window.setTimeout(() => {
+      setCopyToast(null);
+    }, 2200);
+  };
 
   // Live Selfie Camera Modal
   const [selfieModalOpen, setSelfieModalOpen] = useState(false);
@@ -1096,7 +1111,8 @@ export function RiderApp() {
                 );
                 const customerNavUrl = customerCoords
                   ? buildMapsDirectionsUrl(customerCoords.lat, customerCoords.lng)
-                  : buildGoogleMapsUrl(order.address);
+                  : buildMapsDirectionsByAddressUrl(order.address);
+                const displayCustomerPhone = formatDisplayPhone10(order.customerMobile);
 
                 const awaitingAcceptance = isAwaitingRiderAcceptance(order);
                 const acceptanceTimer = awaitingAcceptance
@@ -1218,17 +1234,26 @@ export function RiderApp() {
 
                     {/* Step-by-Step Controls */}
                     <div className="space-y-2.5 pt-2 border-t border-slate-100">
-                      {/* Call Customer button (Android Telecom Intent + Copy fallback) */}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          triggerPhoneCall(order.customerMobile, setActionMessage)
-                        }
-                        className="w-full min-h-[46px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 font-semibold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                      >
-                        <Phone className="w-4 h-4 text-blue-700" aria-hidden="true" />
-                        <span>Call Customer ({order.customerMobile})</span>
-                      </button>
+                      {/* Full 10-Digit Customer Phone + Simple tel: Call + Copy Number */}
+                      <div className="grid grid-cols-[1fr_auto] gap-2">
+                        <a
+                          href={buildPhoneCallUrl(order.customerMobile)}
+                          className="min-h-[46px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 font-semibold text-sm flex items-center justify-center gap-2 transition-colors tabular-nums"
+                        >
+                          <Phone className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
+                          <span>Call Customer ({displayCustomerPhone})</span>
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void copyPhoneNumber(order.customerMobile, showCopyToast)
+                          }
+                          className="min-h-[46px] px-3.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                        >
+                          <Copy className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
+                          <span>Copy Number</span>
+                        </button>
+                      </div>
 
                       {/* STEP 1: Accept Order + 3-Minute Acceptance Countdown */}
                       {awaitingAcceptance && (
@@ -1290,14 +1315,15 @@ export function RiderApp() {
                       {/* STEP 2: Navigate to Plant / Pickup Location -> Reached Pickup Location */}
                       {canonicalStatus === 'accepted' && (
                         <div className="space-y-2.5">
-                          <button
-                            type="button"
-                            onClick={() => openExternalMapUrl(plantNavUrl)}
-                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          <a
+                            href={plantNavUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
                           >
                             <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
                             <span>Navigate to Plant / Pickup Location</span>
-                          </button>
+                          </a>
 
                           <button
                             type="button"
@@ -1318,14 +1344,15 @@ export function RiderApp() {
                       {/* STEP 3: Order Picked Up / Out for Delivery */}
                       {canonicalStatus === 'reached_pickup' && (
                         <div className="space-y-2.5">
-                          <button
-                            type="button"
-                            onClick={() => openExternalMapUrl(plantNavUrl)}
-                            className="w-full min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          <a
+                            href={plantNavUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-full min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors"
                           >
                             <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
                             <span>Navigate to Plant / Pickup Location</span>
-                          </button>
+                          </a>
 
                           <button
                             type="button"
@@ -1348,14 +1375,15 @@ export function RiderApp() {
                       {/* STEP 4 & STEP 5: Navigate to Customer -> Take Delivery Photo -> Mark as Delivered (Cash Collected) */}
                       {canonicalStatus === 'out_for_delivery' && (
                         <div className="space-y-3">
-                          <button
-                            type="button"
-                            onClick={() => openExternalMapUrl(customerNavUrl)}
-                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          <a
+                            href={customerNavUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
                           >
                             <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
                             <span>Navigate to Customer Location</span>
-                          </button>
+                          </a>
 
                           <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-900 flex items-center gap-2">
                             <PackageCheck className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
@@ -1696,6 +1724,7 @@ export function RiderApp() {
         </div>
       )}
 
+      <CopyToast message={copyToast} />
       <BackExitToast visible={exitPromptVisible} />
     </div>
   );

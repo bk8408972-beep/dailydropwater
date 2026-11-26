@@ -319,18 +319,6 @@ export function validateCheckoutInput(
   if (trimmedAddress.length < 8) {
     errors.address = 'Enter your House/Flat No. and a Tolichowki landmark.';
   }
-  const hasValidGps =
-    typeof input.customerLat === 'number' &&
-    typeof input.customerLng === 'number' &&
-    Number.isFinite(input.customerLat) &&
-    Number.isFinite(input.customerLng) &&
-    input.customerLat >= -90 &&
-    input.customerLat <= 90 &&
-    input.customerLng >= -180 &&
-    input.customerLng <= 180;
-  if (!hasValidGps) {
-    errors.location = MISSING_GPS_MESSAGE;
-  }
   if (input.serviceMode === 'events') {
     if (!input.eventDate?.trim()) {
       errors.eventDate = 'Select your event date for bulk water supply.';

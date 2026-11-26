@@ -77,7 +77,7 @@ test('calculateCartTotals computes accurate item count and rupee subtotal', () =
   assert.equal(totals.subtotal, 275);
 });
 
-test('validateCheckoutInput rejects missing fields, enforces 10-digit mobile, mandatory GPS, and events date', () => {
+test('validateCheckoutInput rejects missing required fields, enforces 10-digit mobile and events date, and keeps GPS optional', () => {
   const invalidFast = validateCheckoutInput({
     customerName: 'A',
     customerMobile: '12345',
@@ -91,17 +91,14 @@ test('validateCheckoutInput rejects missing fields, enforces 10-digit mobile, ma
   assert.ok(invalidFast.customerName);
   assert.ok(invalidFast.customerMobile);
   assert.ok(invalidFast.address);
-  assert.equal(
-    invalidFast.location,
-    'Please share your current GPS location first to place the order.'
-  );
+  assert.equal(invalidFast.location, undefined);
 
   const invalidEvents = validateCheckoutInput({
     customerName: 'Syed Ahmed',
     customerMobile: '9848012345',
     address: 'Flat 302, Paramount Colony, Tolichowki',
-    customerLat: 17.3991,
-    customerLng: 78.4152,
+    customerLat: null,
+    customerLng: null,
     serviceMode: 'events',
     eventDate: '',
     timeSlot: '',
@@ -111,7 +108,18 @@ test('validateCheckoutInput rejects missing fields, enforces 10-digit mobile, ma
   assert.ok(invalidEvents.eventDate);
   assert.ok(invalidEvents.timeSlot);
 
-  const valid = validateCheckoutInput({
+  const validAddressOnly = validateCheckoutInput({
+    customerName: 'Syed Ahmed',
+    customerMobile: '9848012345',
+    address: 'Flat 302, Paramount Colony, Tolichowki',
+    customerLat: null,
+    customerLng: null,
+    serviceMode: 'fast',
+    itemCount: 2,
+  });
+  assert.equal(Object.keys(validAddressOnly).length, 0);
+
+  const validWithGps = validateCheckoutInput({
     customerName: 'Syed Ahmed',
     customerMobile: '9848012345',
     address: 'Flat 302, Paramount Colony, Tolichowki',
@@ -120,7 +128,7 @@ test('validateCheckoutInput rejects missing fields, enforces 10-digit mobile, ma
     serviceMode: 'fast',
     itemCount: 2,
   });
-  assert.equal(Object.keys(valid).length, 0);
+  assert.equal(Object.keys(validWithGps).length, 0);
 });
 
 test('computeSalesMetrics supports both canonical lowercase and legacy uppercase statuses', () => {
@@ -371,46 +379,49 @@ test('weekly cleanup selects only delivered/rejected orders and preserves active
   assert.deepEqual(inactiveMobiles.sort(), ['9000000001', '9000000002']);
 });
 
-test('androidIntents produces Android Intent URLs on Android WebView and safe fallbacks on desktop', async () => {
+test('androidIntents produces MIT App Inventor safe tel: and standard https:// Maps URLs with zero intent:// schemes', async () => {
   const {
+    formatDisplayPhone10,
     formatIndianPhoneE164,
     buildPhoneCallUrl,
     buildMapsDirectionsUrl,
+    buildMapsDirectionsByAddressUrl,
     buildTrackRiderMapUrl,
   } = await import('./androidIntents');
 
-  const androidUa =
-    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36';
-  const desktopUa =
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
-
+  assert.equal(formatDisplayPhone10('+91 98480-12345'), '9848012345');
+  assert.equal(formatDisplayPhone10('09848012345'), '9848012345');
   assert.equal(formatIndianPhoneE164('9848012345'), '+919848012345');
   assert.equal(formatIndianPhoneE164('+91 98480-12345'), '+919848012345');
 
-  assert.equal(
-    buildPhoneCallUrl('9848012345', androidUa),
-    'intent://+919848012345#Intent;scheme=tel;package=com.android.server.telecom;end'
-  );
-  assert.equal(buildPhoneCallUrl('9848012345', desktopUa), 'tel:+919848012345');
+  const callUrl = buildPhoneCallUrl('9848012345');
+  assert.equal(callUrl, 'tel:+919848012345');
+  assert.equal(callUrl.includes('intent://'), false);
 
+  const dirUrl = buildMapsDirectionsUrl(17.3984, 78.4146);
   assert.equal(
-    buildMapsDirectionsUrl(17.3984, 78.4146, androidUa),
-    'intent://maps.google.com/maps?daddr=17.398400,78.414600#Intent;scheme=https;package=com.google.android.apps.maps;end'
-  );
-  assert.equal(
-    buildMapsDirectionsUrl(17.3984, 78.4146, desktopUa),
+    dirUrl,
     'https://www.google.com/maps/dir/?api=1&destination=17.398400,78.414600'
   );
+  assert.equal(dirUrl.includes('intent://'), false);
 
-  assert.equal(
-    buildTrackRiderMapUrl(17.4002, 78.4161, androidUa),
-    'intent://maps.google.com/maps?q=17.400200,78.416100#Intent;scheme=https;package=com.google.android.apps.maps;end'
+  const addrDirUrl = buildMapsDirectionsByAddressUrl(
+    'Flat 302, Paramount Colony'
   );
   assert.equal(
-    buildTrackRiderMapUrl(17.4002, 78.4161, desktopUa),
-    'https://maps.google.com/?q=17.400200,78.416100'
+    addrDirUrl,
+    'https://www.google.com/maps/dir/?api=1&destination=Flat%20302%2C%20Paramount%20Colony%2C%20Tolichowki%2C%20Hyderabad'
   );
+  assert.equal(addrDirUrl.includes('intent://'), false);
+
+  const trackUrl = buildTrackRiderMapUrl(17.4002, 78.4161);
+  assert.equal(
+    trackUrl,
+    'https://www.google.com/maps/search/?api=1&query=17.400200,78.416100'
+  );
+  assert.equal(trackUrl.includes('intent://'), false);
 });
+
 
 
 

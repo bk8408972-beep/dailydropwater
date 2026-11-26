@@ -72,6 +72,7 @@ export interface Order {
   customerLat?: number | null;
   customerLng?: number | null;
   customerLocation?: GeoPoint | null;
+  gpsStatus?: 'captured' | 'address_only';
   riderLat?: number | null;
   riderLng?: number | null;
   riderLocationUpdatedAt?: number | null;

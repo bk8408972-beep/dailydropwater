@@ -45,6 +45,7 @@ import {
 } from '../utils/sound';
 import { BrandLogo } from './BrandLogo';
 import { BackExitToast } from './BackExitToast';
+import { CopyToast } from './CopyToast';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 import { LiveOrdersTab } from './owner/LiveOrdersTab';
 import { RidersTab } from './owner/RidersTab';
@@ -63,6 +64,22 @@ export function OwnerApp() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [isRinging, setIsRinging] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
+  const copyToastTimerRef = useRef<number | null>(null);
+
+  const handleTabNotify = (msg: string) => {
+    if (msg === 'Number copied!') {
+      setCopyToast(msg);
+      if (copyToastTimerRef.current !== null) {
+        window.clearTimeout(copyToastTimerRef.current);
+      }
+      copyToastTimerRef.current = window.setTimeout(() => {
+        setCopyToast(null);
+      }, 2200);
+      return;
+    }
+    setToast(msg);
+  };
 
   // Custom Ringtone state
   const [ringtoneInfo, setRingtoneInfo] = useState<CustomRingtoneInfo>(() =>
@@ -101,6 +118,9 @@ export function OwnerApp() {
     return () => {
       cleanupUnlock();
       stopOrderAlertLoop();
+      if (copyToastTimerRef.current !== null) {
+        window.clearTimeout(copyToastTimerRef.current);
+      }
     };
   }, []);
 
@@ -686,20 +706,20 @@ export function OwnerApp() {
             riders={riders}
             completedCleanupCount={completedOrdersForCleanup.length}
             onOpenWeeklyCleanup={() => setCleanupModalOpen(true)}
-            onNotify={setToast}
+            onNotify={handleTabNotify}
           />
         )}
         {activeTab === 'riders' && (
-          <RidersTab riders={riders} onNotify={setToast} />
+          <RidersTab riders={riders} onNotify={handleTabNotify} />
         )}
         {activeTab === 'stock' && (
-          <StockTab products={products} onNotify={setToast} />
+          <StockTab products={products} onNotify={handleTabNotify} />
         )}
         {activeTab === 'sales' && (
           <SalesCustomersTab
             orders={orders}
             customers={customers}
-            onNotify={setToast}
+            onNotify={handleTabNotify}
           />
         )}
       </main>
@@ -977,6 +997,7 @@ export function OwnerApp() {
         </div>
       )}
 
+      <CopyToast message={copyToast} />
       <BackExitToast visible={exitPromptVisible} />
     </div>
   );
