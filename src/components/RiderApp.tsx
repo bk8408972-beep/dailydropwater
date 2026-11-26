@@ -4,6 +4,7 @@ import {
   Banknote,
   Bell,
   BellOff,
+  BellRing,
   Building2,
   Camera,
   CheckCircle2,
@@ -18,6 +19,7 @@ import {
   Phone,
   Play,
   Power,
+  Radio,
   RotateCcw,
   Square,
   Truck,
@@ -57,6 +59,7 @@ import {
 import { formatFloorLiftSummary } from '../utils/storeSettings';
 import { compressDeliveryPhotoFile } from '../utils/imageCompress';
 import {
+  ensureOrderAlertAudioPlaying,
   getCustomRingtoneInfo,
   installGlobalAudioUnlock,
   playShortTestChime,
@@ -68,6 +71,18 @@ import {
   unlockAudioContext,
   type CustomRingtoneInfo,
 } from '../utils/sound';
+import {
+  detectNewlyArrivedRiderOrders,
+  getNotificationPermissionState,
+  isBackgroundKeepAliveActive,
+  registerDailyDropServiceWorker,
+  requestBackgroundAlertPermission,
+  showHighPriorityOrderNotification,
+  startDutyBackgroundKeepAlive,
+  stopDutyBackgroundKeepAlive,
+  subscribeNotificationClickMessages,
+  type NotificationPermissionState,
+} from '../utils/backgroundAlerts';
 import { BrandLogo } from './BrandLogo';
 import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
@@ -166,6 +181,21 @@ export function RiderApp() {
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const timedOutAssignmentKeysRef = useRef<Set<string>>(new Set());
 
+  // High-priority System Notification + Background Audio Keep-Alive (Media Session) state
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermissionState>(() => getNotificationPermissionState());
+  const [keepAliveActive, setKeepAliveActive] = useState<boolean>(() =>
+    isBackgroundKeepAliveActive()
+  );
+  const [keepAliveNeedsTap, setKeepAliveNeedsTap] = useState(false);
+  const [ordersLoaded, setOrdersLoaded] = useState(false);
+  const [activeAlarmOrderIds, setActiveAlarmOrderIds] = useState<string[]>([]);
+  const notifiedAssignmentKeysRef = useRef<Set<string>>(new Set());
+  const prevDutyOnlineRef = useRef<boolean>(Boolean(initialSavedSession?.isOnline));
+  const soundEnabledRef = useRef(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
+  const activeAlarmCountRef = useRef(0);
+
   const stopCameraStream = () => {
     if (streamRef.current) {
       for (const track of streamRef.current.getTracks()) {
@@ -178,10 +208,30 @@ export function RiderApp() {
 
   useEffect(() => {
     const cleanupUnlock = installGlobalAudioUnlock();
+    void registerDailyDropServiceWorker();
+    const unsubNotifClick = subscribeNotificationClickMessages((payload) => {
+      if (payload.role && payload.role !== 'rider') return;
+      setRiderTab('active');
+      if (soundEnabledRef.current && activeAlarmCountRef.current > 0) {
+        ensureOrderAlertAudioPlaying('rider');
+        setIsRinging(true);
+      }
+      if (payload.orderId) {
+        window.setTimeout(() => {
+          const el = document.getElementById(`order-${payload.orderId}`);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }, 120);
+      }
+    });
+
     return () => {
       cleanupUnlock();
+      unsubNotifClick();
       stopCameraStream();
       stopOrderAlertLoop();
+      stopDutyBackgroundKeepAlive();
     };
   }, []);
 
@@ -198,6 +248,8 @@ export function RiderApp() {
           clearRiderSession();
           stopCameraStream();
           stopOrderAlertLoop();
+          stopDutyBackgroundKeepAlive();
+          setKeepAliveActive(false);
           setIsRinging(false);
           setSessionRiderId(null);
           setRider(null);
@@ -212,10 +264,15 @@ export function RiderApp() {
       }
     );
 
+    setOrdersLoaded(false);
+    notifiedAssignmentKeysRef.current = new Set();
+    setActiveAlarmOrderIds([]);
+
     const unsubOrders = subscribePath<Record<string, Order>>('orders', (data) => {
       if (!active) return;
       if (!data) {
         setOrders([]);
+        setOrdersLoaded(true);
         return;
       }
       const list = Object.entries(data)
@@ -223,6 +280,7 @@ export function RiderApp() {
         .filter((ord) => ord.assignedRiderId === sessionRiderId)
         .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
       setOrders(list);
+      setOrdersLoaded(true);
     });
 
     return () => {
@@ -274,6 +332,15 @@ export function RiderApp() {
       ),
     [awaitingAcceptanceOrders, acknowledgedOrderIds]
   );
+
+  const ringingAssignedOrders = useMemo(
+    () =>
+      unacknowledgedAssignedOrders.filter((o) =>
+        activeAlarmOrderIds.includes(o.id)
+      ),
+    [unacknowledgedAssignedOrders, activeAlarmOrderIds]
+  );
+  activeAlarmCountRef.current = ringingAssignedOrders.length;
 
   // Tick every second while any assigned order is awaiting Step 1 acceptance
   useEffect(() => {
@@ -428,21 +495,158 @@ export function RiderApp() {
     };
   }, [sessionRiderId, isDutyOnline, shouldTrackGps]);
 
-  // Continuously ring original DailyDrop dual-tone delivery chime + vibration for newly assigned orders
+  // Maintain silent background AudioContext + looping silent <audio> + Media Session metadata
+  // whenever Rider Duty is ON so Android Chrome keeps the tab awake over YouTube / lock screen.
   useEffect(() => {
-    if (sessionRiderId && soundEnabled && unacknowledgedAssignedOrders.length > 0) {
+    if (!sessionRiderId || !isDutyOnline) {
+      stopDutyBackgroundKeepAlive();
+      setKeepAliveActive(false);
+      setKeepAliveNeedsTap(false);
+      return;
+    }
+
+    let cancelled = false;
+    let retryCleanup: (() => void) | null = null;
+
+    const activateKeepAlive = async () => {
+      const res = await startDutyBackgroundKeepAlive('rider');
+      if (cancelled) return;
+      setKeepAliveActive(res.active);
+      setKeepAliveNeedsTap(res.blockedByAutoplay);
+
+      if (res.blockedByAutoplay && !retryCleanup) {
+        const retryOnTap = () => {
+          void startDutyBackgroundKeepAlive('rider').then((retryRes) => {
+            if (cancelled) return;
+            setKeepAliveActive(retryRes.active);
+            setKeepAliveNeedsTap(retryRes.blockedByAutoplay);
+            if (retryRes.active && retryCleanup) {
+              retryCleanup();
+              retryCleanup = null;
+            }
+          });
+        };
+        window.addEventListener('pointerdown', retryOnTap, { capture: true, passive: true });
+        window.addEventListener('click', retryOnTap, { capture: true, passive: true });
+        retryCleanup = () => {
+          window.removeEventListener('pointerdown', retryOnTap, true);
+          window.removeEventListener('click', retryOnTap, true);
+        };
+      }
+    };
+
+    void activateKeepAlive();
+
+    return () => {
+      cancelled = true;
+      if (retryCleanup) {
+        retryCleanup();
+        retryCleanup = null;
+      }
+    };
+  }, [sessionRiderId, isDutyOnline]);
+
+  // Immediately resume loud gain=1.0 siren when window regains focus ONLY if a new order alarm is actively ringing
+  useEffect(() => {
+    if (!sessionRiderId) return;
+    const handleRegainFocus = () => {
+      setNotificationPermission(getNotificationPermissionState());
+      if (
+        document.visibilityState === 'visible' &&
+        isDutyOnline &&
+        soundEnabledRef.current &&
+        activeAlarmCountRef.current > 0
+      ) {
+        ensureOrderAlertAudioPlaying('rider');
+        setIsRinging(true);
+      }
+    };
+
+    window.addEventListener('focus', handleRegainFocus);
+    document.addEventListener('visibilitychange', handleRegainFocus);
+    return () => {
+      window.removeEventListener('focus', handleRegainFocus);
+      document.removeEventListener('visibilitychange', handleRegainFocus);
+    };
+  }, [sessionRiderId, isDutyOnline]);
+
+  // 100% SILENT on Duty ON & while waiting for orders.
+  // Trigger loud siren (gain=1.0), heavy vibration, and top notification banner ONLY when a new order arrives.
+  useEffect(() => {
+    if (!sessionRiderId) {
+      stopOrderAlertLoop();
+      setIsRinging(false);
+      setActiveAlarmOrderIds([]);
+      return;
+    }
+
+    const justTurnedDutyOn = !prevDutyOnlineRef.current && isDutyOnline;
+    prevDutyOnlineRef.current = isDutyOnline;
+
+    if (!isDutyOnline || justTurnedDutyOn) {
+      stopOrderAlertLoop();
+      setIsRinging(false);
+      setActiveAlarmOrderIds([]);
+    }
+
+    const { newlyArrived, nextKnownKeys } = detectNewlyArrivedRiderOrders(
+      awaitingAcceptanceOrders,
+      notifiedAssignmentKeysRef.current,
+      {
+        isDutyOnline,
+        ordersInitialized: ordersLoaded,
+        justTurnedDutyOn,
+      }
+    );
+    notifiedAssignmentKeysRef.current = nextKnownKeys;
+
+    // Prune active alarms for orders no longer awaiting acceptance
+    const awaitingIdSet = new Set(awaitingAcceptanceOrders.map((o) => o.id));
+    setActiveAlarmOrderIds((prev) => {
+      const pruned = prev.filter((id) => awaitingIdSet.has(id));
+      if (newlyArrived.length === 0) {
+        return pruned.length === prev.length ? prev : pruned;
+      }
+      const merged = new Set(pruned);
+      for (const order of newlyArrived) {
+        merged.add(order.id);
+      }
+      return Array.from(merged);
+    });
+
+    if (newlyArrived.length > 0 && isDutyOnline) {
+      const freshIds = new Set(newlyArrived.map((o) => o.id));
+      setAcknowledgedOrderIds((prev) =>
+        prev.some((id) => freshIds.has(id))
+          ? prev.filter((id) => !freshIds.has(id))
+          : prev
+      );
+      for (const order of newlyArrived) {
+        void showHighPriorityOrderNotification(order, 'rider');
+      }
+      if (soundEnabledRef.current) {
+        ensureOrderAlertAudioPlaying('rider');
+        setIsRinging(true);
+      }
+    }
+  }, [sessionRiderId, isDutyOnline, ordersLoaded, awaitingAcceptanceOrders]);
+
+  // Keep siren loop strictly synced with newly arrived, unacknowledged ringing orders while Duty ON
+  useEffect(() => {
+    if (sessionRiderId && isDutyOnline && soundEnabled && ringingAssignedOrders.length > 0) {
       startRiderAlarmLoop();
       setIsRinging(true);
     } else {
       stopOrderAlertLoop();
       setIsRinging(false);
     }
-  }, [sessionRiderId, soundEnabled, unacknowledgedAssignedOrders.length]);
+  }, [sessionRiderId, isDutyOnline, soundEnabled, ringingAssignedOrders.length]);
 
   const handleAcknowledgeOrders = (orderIds: string[]) => {
     if (orderIds.length === 0) return;
     stopOrderAlertLoop();
     setIsRinging(false);
+    setActiveAlarmOrderIds((prev) => prev.filter((id) => !orderIds.includes(id)));
     setAcknowledgedOrderIds((prev) => {
       const merged = new Set([...prev, ...orderIds]);
       return Array.from(merged);
@@ -454,11 +658,51 @@ export function RiderApp() {
     );
   };
 
+  const handleEnableBackgroundAlerts = async () => {
+    setRingtoneError(null);
+    // Unlock audio & enable silent keep-alive with ZERO audible sound/beep
+    unlockAudioContext();
+    setSoundEnabled(true);
+
+    const perm = await requestBackgroundAlertPermission();
+    setNotificationPermission(perm);
+
+    let bgActive = isBackgroundKeepAliveActive();
+    if (isDutyOnline) {
+      const res = await startDutyBackgroundKeepAlive('rider');
+      bgActive = res.active;
+      setKeepAliveActive(res.active);
+      setKeepAliveNeedsTap(res.blockedByAutoplay);
+    }
+
+    if (perm === 'granted') {
+      setActionMessage(
+        bgActive
+          ? 'Background Order Alerts & Silent Keep-Alive are ON — completely silent until a new order arrives.'
+          : 'Background Order Alerts enabled! Turn Duty ON to start silent background keep-alive.'
+      );
+    } else if (perm === 'denied') {
+      setActionMessage(
+        'System notifications are blocked in browser settings. Enable Notifications for DailyDrop in Chrome Site Settings to get pinned alerts over YouTube.'
+      );
+    } else {
+      setActionMessage(
+        'Silent alert listener ready. Allow browser notifications when prompted for pinned alerts over other apps.'
+      );
+    }
+  };
+
   const handleAlertSoundOnButton = () => {
     setRingtoneError(null);
     unlockAudioContext();
     setSoundEnabled(true);
     playShortTestChime('rider');
+    if (isDutyOnline && !keepAliveActive) {
+      void startDutyBackgroundKeepAlive('rider').then((res) => {
+        setKeepAliveActive(res.active);
+        setKeepAliveNeedsTap(res.blockedByAutoplay);
+      });
+    }
     setActionMessage(
       'Order Alert Sound is ON — audio unlocked for incoming delivery alerts.'
     );
@@ -593,6 +837,12 @@ export function RiderApp() {
   };
 
   const handleOpenDutyOnModal = () => {
+    unlockAudioContext();
+    if (getNotificationPermissionState() === 'default') {
+      void requestBackgroundAlertPermission().then((perm) => {
+        setNotificationPermission(perm);
+      });
+    }
     setSelfieModalOpen(true);
     setTimeout(() => {
       void startFrontCamera();
@@ -635,6 +885,20 @@ export function RiderApp() {
     if (!sessionRiderId || !capturedPreview) return;
     setSavingDuty(true);
     try {
+      // Strictly silent when toggling Duty ON: stop any alarm & start 100% silent keep-alive
+      stopOrderAlertLoop();
+      setIsRinging(false);
+      setActiveAlarmOrderIds([]);
+      unlockAudioContext();
+      if (getNotificationPermissionState() === 'default') {
+        void requestBackgroundAlertPermission().then((perm) => {
+          setNotificationPermission(perm);
+        });
+      }
+      const keepAliveRes = await startDutyBackgroundKeepAlive('rider');
+      setKeepAliveActive(keepAliveRes.active);
+      setKeepAliveNeedsTap(keepAliveRes.blockedByAutoplay);
+
       const dutyOnTime = Date.now();
       await dbPatch(`riders/${sanitizeFirebaseKey(sessionRiderId)}`, {
         isOnline: true,
@@ -651,7 +915,11 @@ export function RiderApp() {
         setRider(updatedRider);
         saveRiderSession(updatedRider, undefined, sessionLoggedInAtRef.current);
       }
-      setActionMessage('Duty is now ON with your live selfie proof saved.');
+      setActionMessage(
+        keepAliveRes.active
+          ? 'Duty is now ON (silent listening mode active — siren rings only when a new order arrives).'
+          : 'Duty is now ON with your live selfie proof saved.'
+      );
       handleCloseSelfieModal();
     } catch (err) {
       setCameraError(
@@ -666,6 +934,9 @@ export function RiderApp() {
     if (!sessionRiderId) return;
     setSavingDuty(true);
     try {
+      stopDutyBackgroundKeepAlive();
+      setKeepAliveActive(false);
+      setKeepAliveNeedsTap(false);
       await dbPatch(`riders/${sanitizeFirebaseKey(sessionRiderId)}`, {
         isOnline: false,
       });
@@ -674,7 +945,7 @@ export function RiderApp() {
         setRider(updatedRider);
         saveRiderSession(updatedRider, undefined, sessionLoggedInAtRef.current);
       }
-      setActionMessage('You are now OFF Duty.');
+      setActionMessage('You are now OFF Duty. Background alert keep-alive stopped.');
     } catch (err) {
       setActionMessage(
         err instanceof Error ? err.message : 'Failed to update duty status.'
@@ -703,6 +974,7 @@ export function RiderApp() {
     if (nextStatus === 'accepted') {
       stopOrderAlertLoop();
       setIsRinging(false);
+      setActiveAlarmOrderIds((prev) => prev.filter((id) => id !== order.id));
       setAcknowledgedOrderIds((prev) =>
         prev.includes(order.id) ? prev : [...prev, order.id]
       );
@@ -745,6 +1017,42 @@ export function RiderApp() {
     } catch (err) {
       setActionMessage(
         err instanceof Error ? err.message : 'Failed to update order status.'
+      );
+    } finally {
+      setUpdatingOrderId(null);
+    }
+  };
+
+  const handleRejectOrder = async (order: Order) => {
+    if (!sessionRiderId) return;
+    // Immediately stop siren & vibration on Reject tap
+    stopOrderAlertLoop();
+    setIsRinging(false);
+    setActiveAlarmOrderIds((prev) => prev.filter((id) => id !== order.id));
+    setAcknowledgedOrderIds((prev) =>
+      prev.includes(order.id) ? prev : [...prev, order.id]
+    );
+    setUpdatingOrderId(order.id);
+    try {
+      const now = Date.now();
+      await dbPatch(`orders/${sanitizeFirebaseKey(order.id)}`, {
+        status: 'unassigned',
+        assignedRiderId: null,
+        assignedRiderName: null,
+        assignedRiderPhone: null,
+        assignedRiderMobile: null,
+        assignedAt: null,
+        timedOutAt: now,
+        lastTimedOutRiderId: sessionRiderId,
+        lastTimedOutRiderName: rider?.name ?? sessionRiderId,
+        updatedAt: now,
+      });
+      setActionMessage(
+        `Order ${order.id} rejected and returned to Owner for re-assignment.`
+      );
+    } catch (err) {
+      setActionMessage(
+        err instanceof Error ? err.message : 'Failed to reject order.'
       );
     } finally {
       setUpdatingOrderId(null);
@@ -950,6 +1258,8 @@ export function RiderApp() {
                 const exitingRiderId = sessionRiderId;
                 stopCameraStream();
                 stopOrderAlertLoop();
+                stopDutyBackgroundKeepAlive();
+                setKeepAliveActive(false);
                 setIsRinging(false);
                 clearRiderSession();
                 setSessionRiderId(null);
@@ -970,28 +1280,48 @@ export function RiderApp() {
         </div>
       </header>
 
-      {/* Clear Top Audio Unlock Bar ("Order Alert Sound: ON" + "Mute Alert") */}
+      {/* Clear Top Audio & Background Alerts Bar */}
       <div className="bg-blue-950 text-white border-b border-blue-900">
         <div className="max-w-5xl mx-auto px-3 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={handleAlertSoundOnButton}
-            data-testid="rider-alert-sound-btn"
-            className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors ${
-              soundEnabled
-                ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                : 'bg-slate-700 hover:bg-slate-600 text-white'
-            }`}
-          >
-            {soundEnabled ? (
-              <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-            ) : (
-              <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
-            )}
-            <span>
-              {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
-            </span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleAlertSoundOnButton}
+              data-testid="rider-alert-sound-btn"
+              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors ${
+                soundEnabled
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                  : 'bg-slate-700 hover:bg-slate-600 text-white'
+              }`}
+            >
+              {soundEnabled ? (
+                <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+              ) : (
+                <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
+              )}
+              <span>
+                {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleEnableBackgroundAlerts()}
+              data-testid="rider-enable-bg-alerts-btn"
+              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer transition-colors ${
+                notificationPermission === 'granted' && (!rider.isOnline || keepAliveActive)
+                  ? 'bg-cyan-400 hover:bg-cyan-300 text-blue-950'
+                  : 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+              }`}
+            >
+              <BellRing className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>
+                {notificationPermission === 'granted' && (!rider.isOnline || keepAliveActive)
+                  ? 'Background Order Alerts: ON'
+                  : 'Enable Background Order Alerts'}
+              </span>
+            </button>
+          </div>
 
           <button
             type="button"
@@ -1005,9 +1335,10 @@ export function RiderApp() {
       </div>
 
       {/* Loud New Delivery Assignment Alert Banner */}
-      {isRinging && unacknowledgedAssignedOrders.length > 0 && (
+      {isRinging && ringingAssignedOrders.length > 0 && (
         <div
           role="alert"
+          data-testid="rider-ringing-banner"
           className="bg-amber-500 text-slate-950 border-b border-amber-600 shadow-sm"
         >
           <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -1015,15 +1346,15 @@ export function RiderApp() {
               <Bell className="w-5 h-5 shrink-0" aria-hidden="true" />
               <span>
                 New Delivery Assigned! Ringing ({ringtoneInfo.name}) ·{' '}
-                {unacknowledgedAssignedOrders.length}{' '}
-                {unacknowledgedAssignedOrders.length === 1 ? 'order' : 'orders'} waiting
+                {ringingAssignedOrders.length}{' '}
+                {ringingAssignedOrders.length === 1 ? 'order' : 'orders'} waiting
               </span>
             </div>
             <button
               type="button"
               onClick={() =>
                 handleAcknowledgeOrders(
-                  unacknowledgedAssignedOrders.map((o) => o.id)
+                  ringingAssignedOrders.map((o) => o.id)
                 )
               }
               className="min-h-[40px] px-4 rounded-xl bg-slate-950 hover:bg-slate-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
@@ -1089,24 +1420,45 @@ export function RiderApp() {
                     : 'Capture a live front-camera selfie to start receiving orders.'}
                 </p>
                 {rider.isOnline && (
-                  <p
-                    className={`text-xs font-semibold mt-1 flex items-center gap-1.5 ${
-                      gpsStatus === 'error'
-                        ? 'text-amber-700'
-                        : 'text-cyan-700'
-                    }`}
-                  >
-                    <Navigation className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                    <span>
-                      {gpsStatus === 'error'
-                        ? gpsError
-                        : lastGpsSentAt
-                          ? `Live GPS sharing every 5s · Updated ${formatRelativeTime(
-                              lastGpsSentAt
-                            )}`
-                          : 'Acquiring live GPS fix (shares every 5s)…'}
-                    </span>
-                  </p>
+                  <>
+                    <p
+                      className={`text-xs font-semibold mt-1 flex items-center gap-1.5 ${
+                        gpsStatus === 'error'
+                          ? 'text-amber-700'
+                          : 'text-cyan-700'
+                      }`}
+                    >
+                      <Navigation className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>
+                        {gpsStatus === 'error'
+                          ? gpsError
+                          : lastGpsSentAt
+                            ? `Live GPS sharing every 5s · Updated ${formatRelativeTime(
+                                lastGpsSentAt
+                              )}`
+                            : 'Acquiring live GPS fix (shares every 5s)…'}
+                      </span>
+                    </p>
+                    <p
+                      data-testid="rider-bg-keepalive-status"
+                      className={`text-xs font-semibold mt-1 flex items-center gap-1.5 ${
+                        keepAliveActive && notificationPermission === 'granted'
+                          ? 'text-emerald-700'
+                          : 'text-amber-700'
+                      }`}
+                    >
+                      <Radio className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>
+                        {keepAliveActive
+                          ? notificationPermission === 'granted'
+                            ? 'Background Keep-Alive Active (Media Session) · Pinned alerts over YouTube ON'
+                            : 'Background Audio Keep-Alive Active · Tap "Enable Background Order Alerts" for pinned banners'
+                          : keepAliveNeedsTap
+                            ? 'Tap "Enable Background Order Alerts" to activate Media Session keep-alive over YouTube'
+                            : 'Starting Background Keep-Alive (Media Session)…'}
+                      </span>
+                    </p>
+                  </>
                 )}
               </div>
             </div>
@@ -1308,6 +1660,7 @@ export function RiderApp() {
                 return (
                   <article
                     key={order.id}
+                    id={`order-${order.id}`}
                     data-testid={`rider-order-${order.id}`}
                     className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col justify-between gap-4"
                   >
@@ -1513,19 +1866,33 @@ export function RiderApp() {
                             </div>
                           )}
 
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              void handleUpdateOrderStep(order, 'accepted')
-                            }
-                            className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
-                          >
-                            <CheckCircle2 className="w-5 h-5 shrink-0" aria-hidden="true" />
-                            <span>{busy ? 'Accepting…' : 'Step 1: Accept Order'}</span>
-                          </button>
+                          <div className="grid grid-cols-[1fr_auto] gap-2">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              data-testid={`rider-accept-order-${order.id}`}
+                              onClick={() =>
+                                void handleUpdateOrderStep(order, 'accepted')
+                              }
+                              className="w-full min-h-[52px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
+                            >
+                              <CheckCircle2 className="w-5 h-5 shrink-0" aria-hidden="true" />
+                              <span>{busy ? 'Accepting…' : 'Step 1: Accept Order'}</span>
+                            </button>
 
-                          {!acknowledgedOrderIds.includes(order.id) && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              data-testid={`rider-reject-order-${order.id}`}
+                              onClick={() => void handleRejectOrder(order)}
+                              className="min-h-[52px] px-4 rounded-xl bg-red-50 hover:bg-red-100 border border-red-300 text-red-700 font-bold text-sm flex items-center justify-center gap-1.5 transition-colors disabled:opacity-60 cursor-pointer shrink-0"
+                            >
+                              <X className="w-4 h-4 shrink-0" aria-hidden="true" />
+                              <span>Reject</span>
+                            </button>
+                          </div>
+
+                          {ringingAssignedOrders.some((ro) => ro.id === order.id) && (
                             <button
                               type="button"
                               onClick={() => handleAcknowledgeOrders([order.id])}

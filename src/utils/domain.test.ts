@@ -322,8 +322,8 @@ test('vibration patterns match requested Owner, Rider, and Customer specificatio
     RIDER_VIBRATION_PATTERN,
     CUSTOMER_VIBRATION_PATTERN,
   } = await import('./sound');
-  assert.deepEqual(OWNER_VIBRATION_PATTERN, [500, 300, 500, 300, 500]);
-  assert.deepEqual(RIDER_VIBRATION_PATTERN, [500, 300, 500, 300, 500]);
+  assert.deepEqual(OWNER_VIBRATION_PATTERN, [1000, 300, 1000, 300, 1000, 300, 1000]);
+  assert.deepEqual(RIDER_VIBRATION_PATTERN, [1000, 300, 1000, 300, 1000, 300, 1000]);
   assert.deepEqual(CUSTOMER_VIBRATION_PATTERN, [300, 150, 300]);
 });
 

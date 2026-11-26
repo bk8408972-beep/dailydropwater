@@ -1,6 +1,10 @@
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { registerDailyDropServiceWorker } from './utils/backgroundAlerts';
+
+// Register Service Worker early for high-priority background Rider & Owner order alerts
+void registerDailyDropServiceWorker();
 
 // Block multi-finger pinch-zoom while preserving smooth single-finger vertical scrolling
 if (typeof document !== 'undefined') {

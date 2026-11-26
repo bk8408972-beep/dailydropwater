@@ -4,6 +4,7 @@ import {
   BarChart3,
   Bell,
   BellOff,
+  BellRing,
   Bike,
   ClipboardList,
   KeyRound,
@@ -52,6 +53,7 @@ import {
   pickBestOnlineRiderForAutoAssign,
 } from '../utils/storeSettings';
 import {
+  ensureOrderAlertAudioPlaying,
   getCustomRingtoneInfo,
   installGlobalAudioUnlock,
   playShortTestChime,
@@ -63,6 +65,17 @@ import {
   unlockAudioContext,
   type CustomRingtoneInfo,
 } from '../utils/sound';
+import {
+  getNotificationPermissionState,
+  isBackgroundKeepAliveActive,
+  registerDailyDropServiceWorker,
+  requestBackgroundAlertPermission,
+  showHighPriorityOrderNotification,
+  startDutyBackgroundKeepAlive,
+  stopDutyBackgroundKeepAlive,
+  subscribeNotificationClickMessages,
+  type NotificationPermissionState,
+} from '../utils/backgroundAlerts';
 import { BrandLogo } from './BrandLogo';
 import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
@@ -147,24 +160,75 @@ export function OwnerApp() {
   const initialOrdersLoadedRef = useRef(false);
   const knownPendingIdsRef = useRef<Set<string>>(new Set());
   const silencedPendingIdsRef = useRef<Set<string>>(new Set());
+  const notifiedOwnerAlertKeysRef = useRef<Set<string>>(new Set());
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
-  // Unlock Web Audio on first tap/keypress and stop any audio loop on unmount
+  // High-priority System Notification + Background Audio Keep-Alive state
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermissionState>(() => getNotificationPermissionState());
+  const [keepAliveActive, setKeepAliveActive] = useState<boolean>(() =>
+    isBackgroundKeepAliveActive()
+  );
+
+  // Unlock Web Audio on first tap/keypress, listen to notification clicks, and stop audio on unmount
   useEffect(() => {
     const cleanupUnlock = installGlobalAudioUnlock();
+    void registerDailyDropServiceWorker();
+    const unsubNotifClick = subscribeNotificationClickMessages((payload) => {
+      if (payload.role && payload.role !== 'owner') return;
+      setActiveTab('orders');
+      if (soundEnabledRef.current) {
+        const hasUnsilenced = Array.from(knownPendingIdsRef.current).some(
+          (id) => !silencedPendingIdsRef.current.has(id)
+        );
+        if (hasUnsilenced) {
+          ensureOrderAlertAudioPlaying('owner');
+          setIsRinging(true);
+        }
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
     return () => {
       cleanupUnlock();
+      unsubNotifClick();
       stopOrderAlertLoop();
+      stopDutyBackgroundKeepAlive();
       if (copyToastTimerRef.current !== null) {
         window.clearTimeout(copyToastTimerRef.current);
       }
     };
   }, []);
 
+  // Immediately resume gain=1.0 siren if Owner window regains focus while an order is waiting
+  useEffect(() => {
+    if (!authenticated) return;
+    const handleRegainFocus = () => {
+      setNotificationPermission(getNotificationPermissionState());
+      if (document.visibilityState !== 'visible' || !soundEnabledRef.current) return;
+      const hasUnsilenced = Array.from(knownPendingIdsRef.current).some(
+        (id) => !silencedPendingIdsRef.current.has(id)
+      );
+      if (hasUnsilenced) {
+        ensureOrderAlertAudioPlaying('owner');
+        setIsRinging(true);
+      }
+    };
+
+    window.addEventListener('focus', handleRegainFocus);
+    document.addEventListener('visibilitychange', handleRegainFocus);
+    return () => {
+      window.removeEventListener('focus', handleRegainFocus);
+      document.removeEventListener('visibilitychange', handleRegainFocus);
+    };
+  }, [authenticated]);
+
   useEffect(() => {
     if (!authenticated) {
       stopOrderAlertLoop();
+      stopDutyBackgroundKeepAlive();
+      setKeepAliveActive(false);
       setIsRinging(false);
       return;
     }
@@ -191,16 +255,20 @@ export function OwnerApp() {
               .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
           : [];
 
-        const currentPendingIds = new Set(
-          list
-            .filter((o) => isOwnerAlertOrder(o))
-            .map((o) => o.id)
-        );
+        const currentAlertOrders = list.filter((o) => isOwnerAlertOrder(o));
+        const currentPendingIds = new Set(currentAlertOrders.map((o) => o.id));
 
         // Prune manually silenced IDs that are no longer PENDING
         for (const id of Array.from(silencedPendingIdsRef.current)) {
           if (!currentPendingIds.has(id)) {
             silencedPendingIdsRef.current.delete(id);
+          }
+        }
+
+        if (!initialOrdersLoadedRef.current) {
+          for (const ord of currentAlertOrders) {
+            const alertKey = `${ord.id}:${normalizeOrderStatus(ord.status)}:${ord.timedOutAt ?? ord.createdAt}`;
+            notifiedOwnerAlertKeysRef.current.add(alertKey);
           }
         }
 
@@ -210,23 +278,41 @@ export function OwnerApp() {
         } else {
           let hasUnsilencedPending = false;
           let hasNewlyArrivedPending = false;
-          for (const id of currentPendingIds) {
+          const newlyAlertableOrders: Order[] = [];
+
+          for (const ord of currentAlertOrders) {
+            const id = ord.id;
             if (!silencedPendingIdsRef.current.has(id)) {
               hasUnsilencedPending = true;
             }
-            if (initialOrdersLoadedRef.current && !knownPendingIdsRef.current.has(id)) {
+            const alertKey = `${ord.id}:${normalizeOrderStatus(ord.status)}:${ord.timedOutAt ?? ord.createdAt}`;
+            if (
+              initialOrdersLoadedRef.current &&
+              (!knownPendingIdsRef.current.has(id) ||
+                !notifiedOwnerAlertKeysRef.current.has(alertKey))
+            ) {
               hasNewlyArrivedPending = true;
+              if (!notifiedOwnerAlertKeysRef.current.has(alertKey)) {
+                notifiedOwnerAlertKeysRef.current.add(alertKey);
+                newlyAlertableOrders.push(ord);
+              }
             }
           }
 
+          for (const ord of newlyAlertableOrders) {
+            void showHighPriorityOrderNotification(ord, 'owner');
+          }
+
           if (hasUnsilencedPending && soundEnabledRef.current) {
-            startOrderAlertLoop();
-            setIsRinging(true);
             if (hasNewlyArrivedPending) {
+              ensureOrderAlertAudioPlaying('owner');
               setToast(
                 'New PENDING order arrived! Loud siren & vibration looping until Accepted or Rejected.'
               );
+            } else {
+              startOrderAlertLoop();
             }
+            setIsRinging(true);
           } else {
             stopOrderAlertLoop();
             setIsRinging(false);
@@ -401,6 +487,34 @@ export function OwnerApp() {
     }
     stopOrderAlertLoop();
     setIsRinging(false);
+  };
+
+  const handleEnableOwnerBackgroundAlerts = async () => {
+    unlockAudioContext();
+    setSoundEnabled(true);
+    playShortTestChime('owner');
+
+    const perm = await requestBackgroundAlertPermission();
+    setNotificationPermission(perm);
+
+    const keepAliveRes = await startDutyBackgroundKeepAlive('owner');
+    setKeepAliveActive(keepAliveRes.active);
+
+    if (perm === 'granted') {
+      setToast(
+        keepAliveRes.active
+          ? 'Background Order Alerts & Media Session Keep-Alive are ON — new orders will alert you over YouTube or other apps.'
+          : 'Background Order Alerts enabled! System banners will stay pinned on screen for new orders.'
+      );
+    } else if (perm === 'denied') {
+      setToast(
+        'Notifications are blocked in browser settings. Allow Notifications for DailyDrop in Chrome Site Settings.'
+      );
+    } else {
+      setToast(
+        'Audio unlocked. Allow browser notifications when prompted for pinned alerts over other apps.'
+      );
+    }
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -706,6 +820,8 @@ export function OwnerApp() {
               type="button"
               onClick={() => {
                 handleStopRinging();
+                stopDutyBackgroundKeepAlive();
+                setKeepAliveActive(false);
                 clearOwnerSession();
                 setAuthenticated(false);
               }}
@@ -719,40 +835,60 @@ export function OwnerApp() {
         </div>
       </header>
 
-      {/* Clear Top Audio Unlock Bar ("Order Alert Sound: ON" + "Mute Alert") */}
+      {/* Clear Top Audio & Background Alerts Unlock Bar */}
       <div className="bg-slate-800 text-white border-b border-slate-700">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2">
-          <button
-            type="button"
-            data-testid="owner-alert-sound-btn"
-            onClick={() => {
-              unlockAudioContext();
-              setSoundEnabled(true);
-              silencedPendingIdsRef.current.clear();
-              playShortTestChime('owner');
-              if (knownPendingIdsRef.current.size > 0) {
-                startOrderAlertLoop();
-                setIsRinging(true);
-              }
-              setToast(
-                'Order Alert Sound is ON — audio unlocked for incoming & unassigned order alerts.'
-              );
-            }}
-            className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors ${
-              soundEnabled
-                ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                : 'bg-slate-700 hover:bg-slate-600 text-white'
-            }`}
-          >
-            {soundEnabled ? (
-              <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-            ) : (
-              <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
-            )}
-            <span>
-              {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
-            </span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="owner-alert-sound-btn"
+              onClick={() => {
+                unlockAudioContext();
+                setSoundEnabled(true);
+                silencedPendingIdsRef.current.clear();
+                playShortTestChime('owner');
+                if (knownPendingIdsRef.current.size > 0) {
+                  startOrderAlertLoop();
+                  setIsRinging(true);
+                }
+                setToast(
+                  'Order Alert Sound is ON — audio unlocked for incoming & unassigned order alerts.'
+                );
+              }}
+              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors ${
+                soundEnabled
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                  : 'bg-slate-700 hover:bg-slate-600 text-white'
+              }`}
+            >
+              {soundEnabled ? (
+                <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+              ) : (
+                <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
+              )}
+              <span>
+                {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="owner-enable-bg-alerts-btn"
+              onClick={() => void handleEnableOwnerBackgroundAlerts()}
+              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer transition-colors ${
+                notificationPermission === 'granted' && keepAliveActive
+                  ? 'bg-cyan-400 hover:bg-cyan-300 text-slate-950'
+                  : 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+              }`}
+            >
+              <BellRing className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>
+                {notificationPermission === 'granted' && keepAliveActive
+                  ? 'Background Order Alerts: ON'
+                  : 'Enable Background Order Alerts'}
+              </span>
+            </button>
+          </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <button

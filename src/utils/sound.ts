@@ -2,7 +2,7 @@ export const MAX_RINGTONE_BYTES = 3 * 1024 * 1024; // 3 MB
 
 export type RingtoneRole = 'owner' | 'rider';
 
-export const ORDER_ALERT_VIBRATION_PATTERN = [500, 300, 500, 300, 500];
+export const ORDER_ALERT_VIBRATION_PATTERN = [1000, 300, 1000, 300, 1000, 300, 1000];
 export const OWNER_VIBRATION_PATTERN = ORDER_ALERT_VIBRATION_PATTERN;
 export const RIDER_VIBRATION_PATTERN = ORDER_ALERT_VIBRATION_PATTERN;
 export const CUSTOMER_VIBRATION_PATTERN = [300, 150, 300];
@@ -253,7 +253,7 @@ export function playDailyDropDualToneChime(
   try {
     const now = ctx.currentTime;
     const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.9, now);
+    masterGain.gain.setValueAtTime(1.0, now);
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
@@ -290,8 +290,8 @@ export function playDailyDropDualToneChime(
       oscHarmony.frequency.setValueAtTime(pulse.f2, now + pulse.start);
 
       env.gain.setValueAtTime(0.0001, now + pulse.start);
-      env.gain.exponentialRampToValueAtTime(0.55, now + pulse.start + 0.015);
-      env.gain.setValueAtTime(0.46, now + pulse.start + pulse.duration - 0.04);
+      env.gain.exponentialRampToValueAtTime(0.68, now + pulse.start + 0.015);
+      env.gain.setValueAtTime(0.58, now + pulse.start + pulse.duration - 0.04);
       env.gain.exponentialRampToValueAtTime(0.0008, now + pulse.start + pulse.duration);
 
       oscPrimary.connect(env);
@@ -528,6 +528,25 @@ export function startOrderAlertLoop(): boolean {
 
 export function startRiderAlarmLoop(): boolean {
   return startRoleAlarmLoop('rider');
+}
+
+/**
+ * Immediately resumes Web Audio and triggers a loud gain=1.0 siren pulse (and ensures loop is active)
+ * when a high-priority order notification fires or the window regains focus.
+ */
+export function ensureOrderAlertAudioPlaying(role: RingtoneRole): boolean {
+  unlockAudioContext();
+  if (activeLoopMode === role) {
+    if (activeAudioEl && activeAudioEl.paused) {
+      void activeAudioEl.play().catch(() => {
+        playDailyDropDualToneChime(role, true);
+      });
+    } else if (!activeAudioEl) {
+      playDailyDropDualToneChime(role, true);
+    }
+    return true;
+  }
+  return startRoleAlarmLoop(role);
 }
 
 /**
