@@ -13,15 +13,15 @@ import {
 } from './domain';
 import type { Order, RiderRecord } from '../types';
 
-test('parseAppRole resolves direct role routes and defaults to launcher', () => {
+test('parseAppRole resolves direct separate URLs and defaults root URL directly to customer', () => {
   assert.equal(parseAppRole('?app=customer'), 'customer');
   assert.equal(parseAppRole('?app=rider'), 'rider');
   assert.equal(parseAppRole('?app=owner'), 'owner');
   assert.equal(parseAppRole('?app=OWNER'), 'owner');
   assert.equal(parseAppRole('?app=privacy'), 'privacy');
   assert.equal(parseAppRole('?app=PRIVACY'), 'privacy');
-  assert.equal(parseAppRole(''), 'launcher');
-  assert.equal(parseAppRole('?app=unknown'), 'launcher');
+  assert.equal(parseAppRole(''), 'customer');
+  assert.equal(parseAppRole('?app=unknown'), 'customer');
 });
 
 test('DEFAULT_PRODUCTS includes all 7 required seeded products with exact prices and stock', () => {

@@ -218,7 +218,7 @@ export function parseAppRole(search: string): AppRole {
   ) {
     return role;
   }
-  return 'launcher';
+  return 'customer';
 }
 
 export function resolveProductImage(product: Pick<Product, 'name' | 'category' | 'image'>): string {

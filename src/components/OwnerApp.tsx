@@ -4,7 +4,6 @@ import {
   BarChart3,
   Bell,
   BellOff,
-  BellRing,
   Bike,
   ClipboardList,
   KeyRound,
@@ -492,7 +491,6 @@ export function OwnerApp() {
   const handleEnableOwnerBackgroundAlerts = async () => {
     unlockAudioContext();
     setSoundEnabled(true);
-    playShortTestChime('owner');
 
     const perm = await requestBackgroundAlertPermission();
     setNotificationPermission(perm);
@@ -871,23 +869,6 @@ export function OwnerApp() {
               </span>
             </button>
 
-            <button
-              type="button"
-              data-testid="owner-enable-bg-alerts-btn"
-              onClick={() => void handleEnableOwnerBackgroundAlerts()}
-              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer transition-colors ${
-                notificationPermission === 'granted' && keepAliveActive
-                  ? 'bg-cyan-400 hover:bg-cyan-300 text-slate-950'
-                  : 'bg-amber-400 hover:bg-amber-300 text-slate-950'
-              }`}
-            >
-              <BellRing className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>
-                {notificationPermission === 'granted' && keepAliveActive
-                  ? 'Background Order Alerts: ON'
-                  : 'Enable Background Order Alerts'}
-              </span>
-            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -924,6 +905,23 @@ export function OwnerApp() {
               <Zap className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>
                 Auto-Assign Online Rider: {storeSettings.autoAssign ? 'ON' : 'OFF'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="owner-enable-notifications-btn"
+              onClick={() => void handleEnableOwnerBackgroundAlerts()}
+              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors ${
+                notificationPermission === 'granted' && keepAliveActive
+                  ? 'bg-cyan-400 hover:bg-cyan-300 text-slate-950'
+                  : 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+              }`}
+            >
+              <span>
+                {notificationPermission === 'granted' && keepAliveActive
+                  ? '🔔 Notifications: ON'
+                  : '🔔 Enable Notifications'}
               </span>
             </button>
 

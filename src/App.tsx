@@ -3,7 +3,6 @@ import type { AppRole } from './types';
 import { parseAppRole } from './utils/domain';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { SplashScreen } from './components/SplashScreen';
-import { LauncherScreen } from './components/LauncherScreen';
 import { CustomerApp } from './components/CustomerApp';
 import { RiderApp } from './components/RiderApp';
 import { OwnerApp } from './components/OwnerApp';
@@ -56,7 +55,7 @@ function DailyDropRouter() {
     setShowSplash(false);
   }, []);
 
-  const handleSelectRole = useCallback((nextRole: Exclude<AppRole, 'launcher'>) => {
+  const handleNavigateRole = useCallback((nextRole: 'customer' | 'privacy') => {
     const url = new URL(window.location.href);
     url.searchParams.set('app', nextRole);
     window.history.pushState({}, '', url.toString());
@@ -71,13 +70,8 @@ function DailyDropRouter() {
   if (role === 'privacy') {
     return (
       <PrivacyPolicyScreen
-        onBackToApp={() => handleSelectRole('customer')}
+        onBackToApp={() => handleNavigateRole('customer')}
       />
-    );
-  }
-  if (role === 'customer') {
-    return (
-      <CustomerApp onOpenPrivacy={() => handleSelectRole('privacy')} />
     );
   }
   if (role === 'rider') {
@@ -87,10 +81,7 @@ function DailyDropRouter() {
     return <OwnerApp />;
   }
   return (
-    <LauncherScreen
-      onSelectRole={handleSelectRole}
-      onOpenPrivacy={() => handleSelectRole('privacy')}
-    />
+    <CustomerApp onOpenPrivacy={() => handleNavigateRole('privacy')} />
   );
 }
 

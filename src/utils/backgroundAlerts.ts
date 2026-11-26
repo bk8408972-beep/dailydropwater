@@ -1,4 +1,5 @@
 import type { Order } from '../types';
+import { isActiveOrderStatus, normalizeOrderStatus } from './domain';
 
 export type AlertRole = 'rider' | 'owner';
 export type NotificationPermissionState =
@@ -114,6 +115,48 @@ export function buildRiderAssignmentAlertKey(
   order: Pick<Order, 'id' | 'assignedAt' | 'updatedAt' | 'createdAt'>
 ): string {
   return `${order.id}:${order.assignedAt ?? order.updatedAt ?? order.createdAt ?? 0}`;
+}
+
+/**
+ * Selects the single highest-priority unfinished order assigned to a Rider so the Rider App
+ * locks onto a dedicated full-screen Active Order page until Marked Completed or Rejected.
+ * Prioritizes in-progress deliveries (out_for_delivery -> reached_pickup -> accepted) over newly assigned orders.
+ */
+export function selectLockedActiveOrder<
+  T extends Pick<Order, 'id' | 'status' | 'assignedRiderId' | 'assignedAt' | 'createdAt'>,
+>(orders: T[], riderId: string | null): T | null {
+  if (!riderId) return null;
+  const assignedActive = orders.filter(
+    (o) =>
+      o.assignedRiderId === riderId &&
+      isActiveOrderStatus(o.status) &&
+      normalizeOrderStatus(o.status) !== 'unassigned'
+  );
+  if (assignedActive.length === 0) return null;
+
+  const priorityRank = (status?: string | null): number => {
+    switch (normalizeOrderStatus(status)) {
+      case 'out_for_delivery':
+        return 0;
+      case 'reached_pickup':
+        return 1;
+      case 'accepted':
+        return 2;
+      case 'assigned':
+      case 'pending':
+        return 3;
+      default:
+        return 4;
+    }
+  };
+
+  return [...assignedActive].sort((a, b) => {
+    const rankDiff = priorityRank(a.status) - priorityRank(b.status);
+    if (rankDiff !== 0) return rankDiff;
+    const aTime = a.assignedAt ?? a.createdAt ?? 0;
+    const bTime = b.assignedAt ?? b.createdAt ?? 0;
+    return bTime - aTime;
+  })[0];
 }
 
 /**

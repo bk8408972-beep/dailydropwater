@@ -7,6 +7,7 @@ import {
   detectNewlyArrivedRiderOrders,
   getMediaSessionTitle,
   isBackgroundKeepAliveActive,
+  selectLockedActiveOrder,
   stopDutyBackgroundKeepAlive,
 } from './backgroundAlerts';
 
@@ -155,4 +156,58 @@ test('detectNewlyArrivedRiderOrders stays 100% silent on initial load, Duty OFF,
     step6.newlyArrived.map((o) => o.id),
     ['DD-NEW']
   );
+});
+
+test('selectLockedActiveOrder locks on unfinished assigned orders, prioritizes in-progress deliveries, and unlocks when delivered or unassigned', () => {
+  assert.equal(selectLockedActiveOrder([], 'DD001'), null);
+
+  const delivered = {
+    id: 'DD-DONE',
+    status: 'delivered' as const,
+    assignedRiderId: 'DD001',
+    assignedAt: 1000,
+    createdAt: 1000,
+  };
+  const unassigned = {
+    id: 'DD-REJ',
+    status: 'unassigned' as const,
+    assignedRiderId: null,
+    assignedAt: null,
+    createdAt: 1500,
+  };
+  assert.equal(selectLockedActiveOrder([delivered, unassigned], 'DD001'), null);
+
+  const newlyAssigned = {
+    id: 'DD-NEW',
+    status: 'assigned' as const,
+    assignedRiderId: 'DD001',
+    assignedAt: 3000,
+    createdAt: 3000,
+  };
+  assert.equal(
+    selectLockedActiveOrder([delivered, newlyAssigned], 'DD001')?.id,
+    'DD-NEW'
+  );
+
+  const outForDelivery = {
+    id: 'DD-OFD',
+    status: 'out_for_delivery' as const,
+    assignedRiderId: 'DD001',
+    assignedAt: 2000,
+    createdAt: 2000,
+  };
+  assert.equal(
+    selectLockedActiveOrder([newlyAssigned, outForDelivery], 'DD001')?.id,
+    'DD-OFD'
+  );
+
+  // Another rider's order never locks DD001
+  const otherRiderOrder = {
+    id: 'DD-OTHER',
+    status: 'assigned' as const,
+    assignedRiderId: 'DD002',
+    assignedAt: 4000,
+    createdAt: 4000,
+  };
+  assert.equal(selectLockedActiveOrder([otherRiderOrder], 'DD001'), null);
 });

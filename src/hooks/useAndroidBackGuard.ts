@@ -12,6 +12,10 @@ export interface UseAndroidBackGuardOptions {
   isOnSubView?: boolean;
   /** Callback to return to the app's primary view */
   onReturnHome?: () => void;
+  /** When true, completely blocks leaving the current screen on Back press (only allows closing overlays) */
+  locked?: boolean;
+  /** Optional callback invoked when user presses Back while locked */
+  onLockedBackPress?: () => void;
   /** Window in ms where a second Back press permits exiting (default 2500ms) */
   exitWindowMs?: number;
 }
@@ -21,8 +25,9 @@ const GUARD_STATE_FLAG = 'dailyDropBackGuard';
 /**
  * Prevents accidental Android WebView / browser app exit when tapping hardware or gesture Back:
  * 1. Closes any open modal/drawer first.
- * 2. Returns from secondary tabs to the main view next.
- * 3. On the root view, shows "Press Back again to exit" toast and keeps the app open unless pressed twice within 2.5s.
+ * 2. If `locked` is true (e.g. Rider Active Order screen), strictly prevents navigating back or exiting.
+ * 3. Returns from secondary tabs to the main view next.
+ * 4. On the root view, shows "Press Back again to exit" toast and keeps the app open unless pressed twice within 2.5s.
  */
 export function useAndroidBackGuard({
   scope,
@@ -30,6 +35,8 @@ export function useAndroidBackGuard({
   onCloseOverlay,
   isOnSubView = false,
   onReturnHome,
+  locked = false,
+  onLockedBackPress,
   exitWindowMs = 2500,
 }: UseAndroidBackGuardOptions): { exitPromptVisible: boolean } {
   const [exitPromptVisible, setExitPromptVisible] = useState(false);
@@ -39,6 +46,8 @@ export function useAndroidBackGuard({
     onCloseOverlay,
     isOnSubView,
     onReturnHome,
+    locked,
+    onLockedBackPress,
     exitWindowMs,
   });
   latestRef.current = {
@@ -46,6 +55,8 @@ export function useAndroidBackGuard({
     onCloseOverlay,
     isOnSubView,
     onReturnHome,
+    locked,
+    onLockedBackPress,
     exitWindowMs,
   };
 
@@ -78,6 +89,23 @@ export function useAndroidBackGuard({
     const handlePopState = () => {
       const now = Date.now();
       const current = latestRef.current;
+
+      if (current.hasOpenOverlay) {
+        lastBackPressAtRef.current = null;
+        setExitPromptVisible(false);
+        current.onCloseOverlay();
+        pushGuardSentinel();
+        return;
+      }
+
+      if (current.locked) {
+        lastBackPressAtRef.current = null;
+        setExitPromptVisible(false);
+        current.onLockedBackPress?.();
+        pushGuardSentinel();
+        return;
+      }
+
       const decision = resolveBackNavigationAction({
         hasOpenOverlay: current.hasOpenOverlay,
         isOnSubView: current.isOnSubView,
@@ -85,14 +113,6 @@ export function useAndroidBackGuard({
         nowMs: now,
         exitWindowMs: current.exitWindowMs,
       });
-
-      if (decision === 'close_overlay') {
-        lastBackPressAtRef.current = null;
-        setExitPromptVisible(false);
-        current.onCloseOverlay();
-        pushGuardSentinel();
-        return;
-      }
 
       if (decision === 'return_home') {
         lastBackPressAtRef.current = null;

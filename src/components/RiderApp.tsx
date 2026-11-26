@@ -4,7 +4,6 @@ import {
   Banknote,
   Bell,
   BellOff,
-  BellRing,
   Building2,
   Camera,
   CheckCircle2,
@@ -77,6 +76,7 @@ import {
   isBackgroundKeepAliveActive,
   registerDailyDropServiceWorker,
   requestBackgroundAlertPermission,
+  selectLockedActiveOrder,
   showHighPriorityOrderNotification,
   startDutyBackgroundKeepAlive,
   stopDutyBackgroundKeepAlive,
@@ -88,6 +88,7 @@ import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
 import { InAppMapModal, type MapModalTarget } from './InAppMapModal';
 import { NetworkStatusBanner } from './NetworkStatusBanner';
+import { RiderActiveOrderScreen } from './rider/RiderActiveOrderScreen';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 import {
   buildHydratedRiderFromSession,
@@ -109,6 +110,55 @@ const RIDER_WORKFLOW_STEPS = [
   { key: 'delivered', short: '5. Cash' },
 ] as const;
 
+const LOCKED_ORDER_CACHE_KEY = 'dailydrop_rider_locked_order_v1';
+
+function loadCachedLockedOrder(riderId: string | null): Order | null {
+  if (!riderId || typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(LOCKED_ORDER_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { riderId?: string; order?: Order };
+    if (
+      parsed &&
+      parsed.riderId === riderId &&
+      parsed.order &&
+      typeof parsed.order.id === 'string' &&
+      parsed.order.assignedRiderId === riderId &&
+      isActiveOrderStatus(parsed.order.status)
+    ) {
+      return parsed.order;
+    }
+  } catch {
+    // ignore corrupted cache
+  }
+  return null;
+}
+
+function saveCachedLockedOrder(riderId: string, order: Order | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!order) {
+      window.localStorage.removeItem(LOCKED_ORDER_CACHE_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      LOCKED_ORDER_CACHE_KEY,
+      JSON.stringify({ riderId, order })
+    );
+  } catch {
+    // ignore storage quota failures
+  }
+}
+
+function clearCachedLockedOrder(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(LOCKED_ORDER_CACHE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 export function RiderApp() {
   const [riderIdInput, setRiderIdInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
@@ -126,6 +176,9 @@ export function RiderApp() {
     initialSavedSession?.loggedInAt ?? Date.now()
   );
   const [orders, setOrders] = useState<Order[]>([]);
+  const [cachedLockedOrder, setCachedLockedOrder] = useState<Order | null>(() =>
+    loadCachedLockedOrder(initialSavedSession?.riderId ?? null)
+  );
   const [riderTab, setRiderTab] = useState<'active' | 'history'>('active');
   const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
   const [uploadingPhotoOrderId, setUploadingPhotoOrderId] = useState<string | null>(
@@ -251,6 +304,8 @@ export function RiderApp() {
           stopDutyBackgroundKeepAlive();
           setKeepAliveActive(false);
           setIsRinging(false);
+          clearCachedLockedOrder();
+          setCachedLockedOrder(null);
           setSessionRiderId(null);
           setRider(null);
           setAuthError(
@@ -294,6 +349,27 @@ export function RiderApp() {
     () => orders.filter((o) => isActiveOrderStatus(o.status)),
     [orders]
   );
+
+  const liveLockedActiveOrder = useMemo(
+    () => selectLockedActiveOrder(orders, sessionRiderId),
+    [orders, sessionRiderId]
+  );
+
+  // Sync cached locked active order so reloading the page never flashes Rider Home while unfinished
+  useEffect(() => {
+    if (!sessionRiderId) {
+      clearCachedLockedOrder();
+      setCachedLockedOrder(null);
+      return;
+    }
+    if (!ordersLoaded) return;
+    saveCachedLockedOrder(sessionRiderId, liveLockedActiveOrder);
+    setCachedLockedOrder(liveLockedActiveOrder);
+  }, [sessionRiderId, ordersLoaded, liveLockedActiveOrder]);
+
+  const lockedActiveOrder = ordersLoaded
+    ? liveLockedActiveOrder
+    : cachedLockedOrder;
 
   const outForDeliveryIds = useMemo(
     () =>
@@ -962,16 +1038,8 @@ export function RiderApp() {
       'accepted' | 'reached_pickup' | 'out_for_delivery' | 'delivered'
     >
   ) => {
-    if (nextStatus === 'delivered' && !isSafeImageDataUrl(order.deliveryPhoto)) {
-      setPhotoErrorByOrder((prev) => ({
-        ...prev,
-        [order.id]: 'Take a doorstep delivery photo first before marking as delivered.',
-      }));
-      return;
-    }
-
     setUpdatingOrderId(order.id);
-    if (nextStatus === 'accepted') {
+    if (nextStatus === 'accepted' || nextStatus === 'delivered') {
       stopOrderAlertLoop();
       setIsRinging(false);
       setActiveAlarmOrderIds((prev) => prev.filter((id) => id !== order.id));
@@ -1098,7 +1166,8 @@ export function RiderApp() {
     }
   };
 
-  // Prevent accidental app exit on Android hardware/gesture Back button
+  // Prevent accidental app exit on Android hardware/gesture Back button,
+  // and strictly lock navigation while an Active Order is unfinished.
   const { exitPromptVisible } = useAndroidBackGuard({
     scope: 'rider',
     hasOpenOverlay: Boolean(mapModalTarget || selfieModalOpen || ringtoneModalOpen),
@@ -1110,6 +1179,12 @@ export function RiderApp() {
       } else if (ringtoneModalOpen) {
         setRingtoneModalOpen(false);
       }
+    },
+    locked: Boolean(lockedActiveOrder),
+    onLockedBackPress: () => {
+      setActionMessage(
+        'Active order in progress — tap Mark Order Completed or Reject Order to return to Rider Home.'
+      );
     },
     isOnSubView: riderTab !== 'active',
     onReturnHome: () => setRiderTab('active'),
@@ -1208,6 +1283,51 @@ export function RiderApp() {
     );
   }
 
+  // FULL-SCREEN LOCKED ACTIVE ORDER SCREEN:
+  // Auto-opens as soon as an order is assigned and stays locked until Marked Completed or Rejected.
+  if (lockedActiveOrder) {
+    const isLockedOrderRinging =
+      isRinging &&
+      ringingAssignedOrders.some((ro) => ro.id === lockedActiveOrder.id);
+
+    return (
+      <>
+        <RiderActiveOrderScreen
+          order={lockedActiveOrder}
+          queuedCount={Math.max(0, activeDeliveries.length - 1)}
+          nowMs={nowMs}
+          busy={updatingOrderId === lockedActiveOrder.id}
+          uploadingPhoto={uploadingPhotoOrderId === lockedActiveOrder.id}
+          photoError={photoErrorByOrder[lockedActiveOrder.id]}
+          isRinging={isLockedOrderRinging}
+          ringtoneName={ringtoneInfo.name}
+          actionMessage={actionMessage}
+          onDismissActionMessage={() => setActionMessage(null)}
+          onMuteAlert={(orderId) => handleAcknowledgeOrders([orderId])}
+          onAcceptOrder={(ord) => void handleUpdateOrderStep(ord, 'accepted')}
+          onRejectOrder={(ord) => void handleRejectOrder(ord)}
+          onMarkOutForDelivery={(ord) =>
+            void handleUpdateOrderStep(ord, 'out_for_delivery')
+          }
+          onMarkOrderCompleted={(ord) =>
+            void handleUpdateOrderStep(ord, 'delivered')
+          }
+          onCaptureDeliveryPhoto={(ord, e) =>
+            void handleCaptureDeliveryPhoto(ord, e)
+          }
+          onOpenMapModal={(target) => setMapModalTarget(target)}
+          onShowCopyToast={showCopyToast}
+        />
+        <InAppMapModal
+          target={mapModalTarget}
+          onClose={() => setMapModalTarget(null)}
+          onCopied={showCopyToast}
+        />
+        <CopyToast message={copyToast} />
+      </>
+    );
+  }
+
   return (
     <div className="app-scroll-page bg-slate-50 pb-safe-page">
       <NetworkStatusBanner />
@@ -1262,6 +1382,8 @@ export function RiderApp() {
                 setKeepAliveActive(false);
                 setIsRinging(false);
                 clearRiderSession();
+                clearCachedLockedOrder();
+                setCachedLockedOrder(null);
                 setSessionRiderId(null);
                 setRider(null);
                 if (exitingRiderId) {
@@ -1301,24 +1423,6 @@ export function RiderApp() {
               )}
               <span>
                 {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => void handleEnableBackgroundAlerts()}
-              data-testid="rider-enable-bg-alerts-btn"
-              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer transition-colors ${
-                notificationPermission === 'granted' && (!rider.isOnline || keepAliveActive)
-                  ? 'bg-cyan-400 hover:bg-cyan-300 text-blue-950'
-                  : 'bg-amber-400 hover:bg-amber-300 text-slate-950'
-              }`}
-            >
-              <BellRing className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>
-                {notificationPermission === 'granted' && (!rider.isOnline || keepAliveActive)
-                  ? 'Background Order Alerts: ON'
-                  : 'Enable Background Order Alerts'}
               </span>
             </button>
           </div>
@@ -1451,11 +1555,11 @@ export function RiderApp() {
                       <span>
                         {keepAliveActive
                           ? notificationPermission === 'granted'
-                            ? 'Background Keep-Alive Active (Media Session) · Pinned alerts over YouTube ON'
-                            : 'Background Audio Keep-Alive Active · Tap "Enable Background Order Alerts" for pinned banners'
+                            ? 'Silent Background Keep-Alive Active · Pinned alerts over YouTube ON'
+                            : 'Silent Keep-Alive Active · Tap "🔔 Enable Notifications" for pinned banners'
                           : keepAliveNeedsTap
-                            ? 'Tap "Enable Background Order Alerts" to activate Media Session keep-alive over YouTube'
-                            : 'Starting Background Keep-Alive (Media Session)…'}
+                            ? 'Tap "🔔 Enable Notifications" to enable silent background alerts over YouTube'
+                            : 'Starting Silent Background Keep-Alive…'}
                       </span>
                     </p>
                   </>
@@ -1463,7 +1567,24 @@ export function RiderApp() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                data-testid="rider-enable-notifications-btn"
+                onClick={() => void handleEnableBackgroundAlerts()}
+                className={`min-h-[48px] px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-colors ${
+                  notificationPermission === 'granted' && (!rider.isOnline || keepAliveActive)
+                    ? 'bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-900'
+                    : 'bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-sm'
+                }`}
+              >
+                <span>
+                  {notificationPermission === 'granted' && (!rider.isOnline || keepAliveActive)
+                    ? '🔔 Notifications: ON'
+                    : '🔔 Enable Notifications'}
+                </span>
+              </button>
+
               {rider.isOnline ? (
                 <>
                   <button
