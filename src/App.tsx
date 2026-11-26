@@ -13,13 +13,13 @@ function getTitleForRole(role: AppRole): string {
   switch (role) {
     case 'customer':
     case 'launcher':
-      return 'DailyDrop Water — Water & Cold Drinks Delivery • Tolichowki, Hyderabad';
+      return 'DailyDrop Water — Water & Cold Drinks Delivery';
     case 'privacy':
       return 'Privacy Policy — DailyDrop Water';
     case 'rider':
-      return 'DailyDrop Rider — Tolichowki Delivery Fleet';
+      return 'DailyDrop Rider — Delivery Fleet Portal';
     case 'owner':
-      return 'DailyDrop Owner — Tolichowki Command Center';
+      return 'DailyDrop Owner — Store Command Center';
   }
 }
 

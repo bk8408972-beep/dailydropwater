@@ -4,21 +4,32 @@ import type {
   OwnerAuthConfig,
   Product,
   RiderRecord,
+  StoreSettings,
 } from '../types';
 import {
   DEFAULT_PRODUCTS,
   getCompletedOrdersForCleanup,
   getInactiveCustomerMobilesForCleanup,
 } from '../utils/domain';
+import {
+  DEFAULT_STORE_SETTINGS,
+  normalizeStoreSettings,
+} from '../utils/storeSettings';
+import {
+  buildWeeklyArchiveRecord,
+  selectOrdersEligibleForAutoArchive,
+} from '../utils/weeklyArchive';
+import { getRiderCompletedOrders } from '../utils/riderStats';
+import {
+  assertOwnerAuthenticated,
+  sanitizeAddressInput,
+  sanitizePhone10,
+  sanitizeTextInput,
+  validateOrderWritePayload,
+} from '../utils/security';
 
 export const FIREBASE_DB_URL =
   'https://dailydrop-water-default-rtdb.asia-southeast1.firebasedatabase.app';
-
-export const DEFAULT_OWNER_PASSWORD = [
-  'Babar',
-  'AZEEM',
-  '7864',
-].join('');
 
 /**
  * Sanitizes a single Firebase RTDB path segment by stripping illegal characters
@@ -241,7 +252,7 @@ export function subscribePath<T>(
 let seedingPromise: Promise<Record<string, Product>> | null = null;
 
 /**
- * Ensures /products has the 7 default Tolichowki water & cold drinks products
+ * Ensures /products has the 7 default water & cold drinks products
  * if the Firebase database is empty on first load.
  */
 export async function ensureProductsSeeded(): Promise<Record<string, Product>> {
@@ -263,44 +274,238 @@ export async function ensureProductsSeeded(): Promise<Record<string, Product>> {
   }
 }
 
+export async function getStoreSettings(): Promise<StoreSettings> {
+  const raw = await dbGet<Partial<StoreSettings>>('storeSettings');
+  return normalizeStoreSettings(raw);
+}
+
+export async function ensureStoreSettingsSeeded(): Promise<StoreSettings> {
+  const existing = await dbGet<Partial<StoreSettings>>('storeSettings');
+  if (existing && typeof existing === 'object') {
+    const normalized = normalizeStoreSettings(existing);
+    const missingKeys: Partial<StoreSettings> = {};
+    if (typeof existing.isOpen !== 'boolean') missingKeys.isOpen = normalized.isOpen;
+    if (typeof existing.autoAssign !== 'boolean') missingKeys.autoAssign = normalized.autoAssign;
+    if (typeof existing.platformFee !== 'number') missingKeys.platformFee = normalized.platformFee;
+    if (typeof existing.deliveryFee !== 'number') missingKeys.deliveryFee = normalized.deliveryFee;
+    if (typeof existing.floor2Charge !== 'number') missingKeys.floor2Charge = normalized.floor2Charge;
+    if (typeof existing.floor3PlusCharge !== 'number') missingKeys.floor3PlusCharge = normalized.floor3PlusCharge;
+    if (typeof existing.radiusEnabled !== 'boolean') missingKeys.radiusEnabled = normalized.radiusEnabled;
+    if (typeof existing.deliveryRadiusKm !== 'number') missingKeys.deliveryRadiusKm = normalized.deliveryRadiusKm;
+    if (typeof existing.storeLat !== 'number') missingKeys.storeLat = normalized.storeLat;
+    if (typeof existing.storeLng !== 'number') missingKeys.storeLng = normalized.storeLng;
+    if (typeof existing.upiEnabled !== 'boolean') missingKeys.upiEnabled = normalized.upiEnabled;
+    if (typeof existing.codEnabled !== 'boolean') missingKeys.codEnabled = normalized.codEnabled;
+    if (typeof existing.upiId !== 'string') missingKeys.upiId = normalized.upiId;
+    if (typeof existing.upiName !== 'string') missingKeys.upiName = normalized.upiName;
+    if (Object.keys(missingKeys).length > 0) {
+      await dbPatch('storeSettings', { ...missingKeys, updatedAt: Date.now() });
+    }
+    return normalized;
+  }
+  const seeded: StoreSettings = {
+    ...DEFAULT_STORE_SETTINGS,
+    updatedAt: Date.now(),
+  };
+  await dbSet('storeSettings', seeded);
+  return seeded;
+}
+
+export async function updateStoreSettings(
+  partial: Partial<StoreSettings>
+): Promise<void> {
+  assertOwnerAuthenticated('updating store settings');
+  await dbPatch('storeSettings', {
+    ...partial,
+    updatedAt: Date.now(),
+  });
+}
+
+export async function ownerPatchOrder(
+  orderId: string,
+  partial: Record<string, unknown>
+): Promise<void> {
+  assertOwnerAuthenticated('updating orders');
+  const safeId = sanitizeFirebaseKey(orderId);
+  if (!safeId) throw new Error('Invalid order ID.');
+  await dbPatch(`orders/${safeId}`, {
+    ...partial,
+    updatedAt: Date.now(),
+  });
+}
+
+export async function ownerDeleteOrder(orderId: string): Promise<void> {
+  assertOwnerAuthenticated('deleting an order');
+  const safeId = sanitizeFirebaseKey(orderId);
+  if (!safeId) throw new Error('Invalid order ID.');
+  await dbDelete(`orders/${safeId}`);
+}
+
+export async function ownerSaveProduct(product: Product): Promise<void> {
+  assertOwnerAuthenticated('saving a product');
+  const safeId = sanitizeFirebaseKey(product.id);
+  if (!safeId) throw new Error('Invalid product ID.');
+  await dbSet(`products/${safeId}`, product);
+}
+
+export async function ownerPatchProduct(
+  productId: string,
+  partial: Partial<Product>
+): Promise<void> {
+  assertOwnerAuthenticated('updating a product');
+  const safeId = sanitizeFirebaseKey(productId);
+  if (!safeId) throw new Error('Invalid product ID.');
+  await dbPatch(`products/${safeId}`, partial as Record<string, unknown>);
+}
+
+export async function ownerDeleteProduct(productId: string): Promise<void> {
+  assertOwnerAuthenticated('deleting a product');
+  const safeId = sanitizeFirebaseKey(productId);
+  if (!safeId) throw new Error('Invalid product ID.');
+  await dbDelete(`products/${safeId}`);
+}
+
+export async function ownerSaveRider(rider: RiderRecord): Promise<void> {
+  assertOwnerAuthenticated('adding a rider');
+  const safeId = sanitizeFirebaseKey(rider.id).toUpperCase();
+  if (!safeId) throw new Error('Invalid rider ID.');
+  await dbSet(`riders/${safeId}`, { ...rider, id: safeId });
+}
+
+export async function ownerPatchRider(
+  riderId: string,
+  partial: Partial<RiderRecord>
+): Promise<void> {
+  assertOwnerAuthenticated('updating a rider');
+  const safeId = sanitizeFirebaseKey(riderId).toUpperCase();
+  if (!safeId) throw new Error('Invalid rider ID.');
+  await dbPatch(`riders/${safeId}`, partial as Record<string, unknown>);
+}
+
+export async function ownerDeleteRider(riderId: string): Promise<void> {
+  assertOwnerAuthenticated('deleting a rider');
+  const safeId = sanitizeFirebaseKey(riderId).toUpperCase();
+  if (!safeId) throw new Error('Invalid rider ID.');
+  await dbDelete(`riders/${safeId}`);
+}
+
+export async function ownerDeleteCustomer(mobile: string): Promise<void> {
+  assertOwnerAuthenticated('deleting a customer record');
+  const safeMobile = sanitizeFirebaseKey(sanitizePhone10(mobile));
+  if (!safeMobile) throw new Error('Invalid customer mobile.');
+  await dbDelete(`customers/${safeMobile}`);
+}
+
 export async function placeCustomerOrder(
   order: Order,
   existingCustomer?: CustomerRecord | null
 ): Promise<void> {
-  const safeOrderId = sanitizeFirebaseKey(order.id);
-  const safeMobile = sanitizeFirebaseKey(order.customerMobile);
+  const sanitizedOrder: Order = {
+    ...order,
+    customerName: sanitizeTextInput(order.customerName, 80),
+    customerMobile: sanitizePhone10(order.customerMobile),
+    address: sanitizeAddressInput(order.address, 260),
+    upiVerified: false,
+    upiVerifiedAt: null,
+  };
+
+  const validationError = validateOrderWritePayload(sanitizedOrder);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
+  const safeOrderId = sanitizeFirebaseKey(sanitizedOrder.id);
+  const safeMobile = sanitizeFirebaseKey(sanitizedOrder.customerMobile);
 
   const customerRecord: CustomerRecord = {
     mobile: safeMobile,
-    name: order.customerName.trim(),
-    lastAddress: order.address.trim(),
-    totalOrders: (existingCustomer?.totalOrders ?? 0) + 1,
-    lastOrderAt: order.createdAt,
+    name: sanitizedOrder.customerName,
+    lastAddress: sanitizedOrder.address,
+    totalOrders: Math.max(0, existingCustomer?.totalOrders ?? 0) + 1,
+    lastOrderAt: sanitizedOrder.createdAt,
   };
 
   await Promise.all([
-    dbSet(`orders/${safeOrderId}`, order),
+    dbSet(`orders/${safeOrderId}`, sanitizedOrder),
     dbSet(`customers/${safeMobile}`, customerRecord),
   ]);
 }
 
+/**
+ * Customer self-service data deletion (Google Play Account & Data Deletion Policy):
+ * Permanently deletes /customers/{mobile} and anonymizes personal PII on the customer's
+ * completed (delivered/rejected) orders while preserving any active in-flight deliveries.
+ */
+export async function deleteCustomerProfileData(
+  rawMobile: string
+): Promise<{ deletedProfile: boolean; anonymizedOrders: number }> {
+  const safeMobile = sanitizeFirebaseKey(sanitizePhone10(rawMobile));
+  if (!/^\d{10}$/.test(safeMobile)) {
+    return { deletedProfile: false, anonymizedOrders: 0 };
+  }
+
+  await dbDelete(`customers/${safeMobile}`);
+
+  let anonymizedOrders = 0;
+  try {
+    const allOrders = await dbGet<Record<string, Order>>('orders');
+    if (allOrders && typeof allOrders === 'object') {
+      const patches: Promise<unknown>[] = [];
+      for (const [id, ord] of Object.entries(allOrders)) {
+        if (!ord) continue;
+        const orderMobile = sanitizePhone10(ord.customerMobile || '');
+        if (orderMobile !== safeMobile) continue;
+        const status = (ord.status || '').toLowerCase();
+        if (status === 'delivered' || status === 'rejected') {
+          const safeId = sanitizeFirebaseKey(ord.id || id);
+          if (safeId) {
+            anonymizedOrders += 1;
+            patches.push(
+              dbPatch(`orders/${safeId}`, {
+                customerName: 'Deleted User',
+                address: 'Removed by user request',
+                customerLat: null,
+                customerLng: null,
+                customerLocation: null,
+                deliveryPhoto: null,
+                updatedAt: Date.now(),
+              })
+            );
+          }
+        }
+      }
+      if (patches.length > 0) {
+        await Promise.all(patches);
+      }
+    }
+  } catch {
+    // Profile node itself was already deleted
+  }
+
+  return { deletedProfile: true, anonymizedOrders };
+}
+
 export async function verifyOwnerPassword(inputPassword: string): Promise<boolean> {
   const cleanedInput = inputPassword.trim();
+  if (!cleanedInput) return false;
   const stored = await dbGet<OwnerAuthConfig>('settings/ownerAuth');
-  const activePassword = stored?.password?.trim() || DEFAULT_OWNER_PASSWORD;
-  if (!stored?.password) {
-    // Initialize /settings/ownerAuth in RTDB on first owner auth check
-    dbSet<OwnerAuthConfig>('settings/ownerAuth', {
-      password: DEFAULT_OWNER_PASSWORD,
-      updatedAt: Date.now(),
-    }).catch(() => {});
+  const activePassword = stored?.password?.trim();
+  if (!activePassword) {
+    throw new Error(
+      'Owner authentication is not configured in Firebase /settings/ownerAuth/password.'
+    );
   }
   return cleanedInput === activePassword;
 }
 
 export async function updateOwnerPassword(newPassword: string): Promise<void> {
+  assertOwnerAuthenticated('changing the owner password');
+  const clean = newPassword.trim();
+  if (clean.length < 6) {
+    throw new Error('New password must be at least 6 characters.');
+  }
   await dbSet<OwnerAuthConfig>('settings/ownerAuth', {
-    password: newPassword.trim(),
+    password: clean,
     updatedAt: Date.now(),
   });
 }
@@ -352,12 +557,27 @@ export async function authenticateRider(
 export async function clearCompletedOrdersAndCustomerData(
   orders: Order[],
   customers: CustomerRecord[]
-): Promise<{ deletedOrders: number; deletedCustomers: number }> {
+): Promise<{
+  deletedOrders: number;
+  deletedCustomers: number;
+  archiveId: string | null;
+}> {
+  assertOwnerAuthenticated('clearing completed orders and customer data');
   const completedOrders = getCompletedOrdersForCleanup(orders);
   const inactiveMobiles = getInactiveCustomerMobilesForCleanup(
     orders,
     customers.map((c) => c.mobile)
   );
+
+  let archiveId: string | null = null;
+  if (completedOrders.length > 0) {
+    const archive = buildWeeklyArchiveRecord(
+      completedOrders,
+      'owner_manual_weekly'
+    );
+    archiveId = archive.id;
+    await dbSet(`archives/weeklySummaries/${sanitizeFirebaseKey(archive.id)}`, archive);
+  }
 
   const tasks: Promise<void>[] = [];
 
@@ -380,6 +600,90 @@ export async function clearCompletedOrdersAndCustomerData(
   return {
     deletedOrders: completedOrders.length,
     deletedCustomers: inactiveMobiles.length,
+    archiveId,
+  };
+}
+
+/**
+ * Owner-only operation: archives and deletes completed (delivered/rejected) orders
+ * for a single Rider while preserving financial backups and never touching active orders.
+ */
+export async function clearRiderCompletedHistory(
+  orders: Order[],
+  riderId: string
+): Promise<{ deletedOrders: number; archiveId: string | null }> {
+  assertOwnerAuthenticated('clearing rider order history');
+  const completed = getRiderCompletedOrders(orders, riderId);
+  if (completed.length === 0) {
+    return { deletedOrders: 0, archiveId: null };
+  }
+
+  const archive = buildWeeklyArchiveRecord(
+    completed,
+    'owner_manual_rider',
+    Date.now(),
+    riderId
+  );
+  await dbSet(`archives/weeklySummaries/${sanitizeFirebaseKey(archive.id)}`, archive);
+
+  await Promise.all(
+    completed.map((order) => {
+      const safeId = sanitizeFirebaseKey(order.id);
+      return safeId ? dbDelete(`orders/${safeId}`) : Promise.resolve();
+    })
+  );
+
+  return {
+    deletedOrders: completed.length,
+    archiveId: archive.id,
+  };
+}
+
+/**
+ * Automatic 7-day weekly history maintenance (Owner-triggered on session load):
+ * Archives completed orders older than 7 days to /archives/weeklySummaries and
+ * removes their personal customer data from /orders without ever touching active orders.
+ */
+export async function runAutoWeeklyArchiveIfNeeded(
+  orders: Order[],
+  customers: CustomerRecord[]
+): Promise<{ archivedOrders: number; cleanedCustomers: number; archiveId: string | null }> {
+  assertOwnerAuthenticated('running weekly archive cleanup');
+  const eligible = selectOrdersEligibleForAutoArchive(orders);
+  if (eligible.length === 0) {
+    return { archivedOrders: 0, cleanedCustomers: 0, archiveId: null };
+  }
+
+  const archive = buildWeeklyArchiveRecord(eligible, 'auto_7_day');
+  await dbSet(`archives/weeklySummaries/${sanitizeFirebaseKey(archive.id)}`, archive);
+
+  const eligibleIds = new Set(eligible.map((o) => o.id));
+  const remainingOrders = orders.filter((o) => !eligibleIds.has(o.id));
+  const remainingMobiles = new Set(
+    remainingOrders.map((o) => o.customerMobile.replace(/\D/g, ''))
+  );
+  const removableCustomers = customers
+    .map((c) => c.mobile)
+    .filter((m) => {
+      const digits = m.replace(/\D/g, '');
+      return Boolean(digits) && !remainingMobiles.has(digits);
+    });
+
+  const tasks: Promise<void>[] = [];
+  for (const order of eligible) {
+    const safeId = sanitizeFirebaseKey(order.id);
+    if (safeId) tasks.push(dbDelete(`orders/${safeId}`));
+  }
+  for (const mobile of removableCustomers) {
+    const safeMobile = sanitizeFirebaseKey(mobile);
+    if (safeMobile) tasks.push(dbDelete(`customers/${safeMobile}`));
+  }
+  await Promise.all(tasks);
+
+  return {
+    archivedOrders: eligible.length,
+    cleanedCustomers: removableCustomers.length,
+    archiveId: archive.id,
   };
 }
 

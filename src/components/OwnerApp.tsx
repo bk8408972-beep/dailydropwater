@@ -11,26 +11,46 @@ import {
   Music,
   Package,
   Play,
+  Power,
   RotateCcw,
+  SlidersHorizontal,
   Square,
+  Store,
   Trash2,
   Upload,
   Volume2,
   VolumeX,
   X,
+  Zap,
 } from 'lucide-react';
-import type { CustomerRecord, Order, Product, RiderRecord } from '../types';
+import type {
+  CustomerRecord,
+  Order,
+  Product,
+  RiderRecord,
+  StoreSettings,
+} from '../types';
 import {
   clearCompletedOrdersAndCustomerData,
   ensureProductsSeeded,
+  ensureStoreSettingsSeeded,
+  ownerPatchOrder,
+  runAutoWeeklyArchiveIfNeeded,
   subscribePath,
   updateOwnerPassword,
+  updateStoreSettings,
   verifyOwnerPassword,
 } from '../services/firebaseDb';
 import {
   getCompletedOrdersForCleanup,
+  normalizeOrderStatus,
 } from '../utils/domain';
 import { isOwnerAlertOrder } from '../utils/orderTimer';
+import {
+  DEFAULT_STORE_SETTINGS,
+  normalizeStoreSettings,
+  pickBestOnlineRiderForAutoAssign,
+} from '../utils/storeSettings';
 import {
   getCustomRingtoneInfo,
   installGlobalAudioUnlock,
@@ -46,16 +66,26 @@ import {
 import { BrandLogo } from './BrandLogo';
 import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
+import { InAppMapModal, type MapModalTarget } from './InAppMapModal';
+import { NetworkStatusBanner } from './NetworkStatusBanner';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 import { LiveOrdersTab } from './owner/LiveOrdersTab';
 import { RidersTab } from './owner/RidersTab';
 import { StockTab } from './owner/StockTab';
 import { SalesCustomersTab } from './owner/SalesCustomersTab';
+import { StoreFeesTab } from './owner/StoreFeesTab';
+import {
+  clearOwnerSession,
+  loadOwnerSession,
+  saveOwnerSession,
+} from '../utils/sessionStorage';
 
-type OwnerTab = 'orders' | 'riders' | 'stock' | 'sales';
+type OwnerTab = 'orders' | 'riders' | 'stock' | 'sales' | 'store';
 
 export function OwnerApp() {
-  const [authenticated, setAuthenticated] = useState(false);
+  const [authenticated, setAuthenticated] = useState<boolean>(() =>
+    Boolean(loadOwnerSession())
+  );
   const [passwordInput, setPasswordInput] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
@@ -66,9 +96,10 @@ export function OwnerApp() {
   const [toast, setToast] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
   const copyToastTimerRef = useRef<number | null>(null);
+  const [mapModalTarget, setMapModalTarget] = useState<MapModalTarget | null>(null);
 
   const handleTabNotify = (msg: string) => {
-    if (msg === 'Number copied!') {
+    if (msg === 'Number copied!' || msg === 'Location copied!') {
       setCopyToast(msg);
       if (copyToastTimerRef.current !== null) {
         window.clearTimeout(copyToastTimerRef.current);
@@ -93,6 +124,13 @@ export function OwnerApp() {
   const [riders, setRiders] = useState<RiderRecord[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [customers, setCustomers] = useState<CustomerRecord[]>([]);
+  const [storeSettings, setStoreSettings] = useState<StoreSettings>(
+    DEFAULT_STORE_SETTINGS
+  );
+  const [togglingQuickKey, setTogglingQuickKey] = useState<'isOpen' | 'autoAssign' | null>(null);
+  const autoAssignedOrderIdsRef = useRef<Set<string>>(new Set());
+  const noOnlineRiderNotifiedRef = useRef<Set<string>>(new Set());
+  const autoArchiveCheckedRef = useRef(false);
 
   // Settings modal (Custom Ringtone + Change Owner Password + Weekly Data Cleanup)
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -133,6 +171,15 @@ export function OwnerApp() {
     let active = true;
 
     void ensureProductsSeeded();
+    void ensureStoreSettingsSeeded();
+
+    const unsubStoreSettings = subscribePath<Partial<StoreSettings>>(
+      'storeSettings',
+      (data) => {
+        if (!active) return;
+        setStoreSettings(normalizeStoreSettings(data));
+      }
+    );
 
     const unsubOrders = subscribePath<Record<string, Order>>(
       'orders',
@@ -235,12 +282,118 @@ export function OwnerApp() {
       active = false;
       initialOrdersLoadedRef.current = false;
       stopOrderAlertLoop();
+      unsubStoreSettings();
       unsubOrders();
       unsubRiders();
       unsubProducts();
       unsubCustomers();
     };
   }, [authenticated]);
+
+  // Automatic 7-day weekly history maintenance (archives financial totals before cleaning >7d completed orders)
+  useEffect(() => {
+    if (!authenticated || autoArchiveCheckedRef.current) return;
+    if (orders.length === 0) return;
+    autoArchiveCheckedRef.current = true;
+    void runAutoWeeklyArchiveIfNeeded(orders, customers)
+      .then((res) => {
+        if (res.archivedOrders > 0) {
+          setToast(
+            `Automatic 7-day privacy cleanup archived ${res.archivedOrders} completed ${
+              res.archivedOrders === 1 ? 'order' : 'orders'
+            } (backup ${res.archiveId}) while keeping all active orders safe.`
+          );
+        }
+      })
+      .catch(() => {
+        autoArchiveCheckedRef.current = false;
+      });
+  }, [authenticated, orders, customers]);
+
+  // Safety Auto-Assign Online Rider watcher: if Auto-Assign is ON and an unassigned pending
+  // order arrives (e.g. placed when no rider was online or via another client), auto-assign
+  // it to the Duty-ON rider with fewest active orders, or alert Owner if none are online.
+  useEffect(() => {
+    if (!authenticated || !storeSettings.autoAssign) return;
+
+    const pendingUnassigned = orders.filter(
+      (o) =>
+        normalizeOrderStatus(o.status) === 'pending' &&
+        !o.assignedRiderId &&
+        !o.ownerApproved
+    );
+    if (pendingUnassigned.length === 0) return;
+
+    const workingOrders = orders.map((o) => ({ ...o }));
+    for (const order of pendingUnassigned) {
+      if (autoAssignedOrderIdsRef.current.has(order.id)) continue;
+
+      const bestRider = pickBestOnlineRiderForAutoAssign(riders, workingOrders);
+      if (!bestRider) {
+        if (!noOnlineRiderNotifiedRef.current.has(order.id)) {
+          noOnlineRiderNotifiedRef.current.add(order.id);
+          setToast(
+            `New order ${order.id} arrived — no Duty-ON riders online! Please assign manually.`
+          );
+        }
+        continue;
+      }
+
+      autoAssignedOrderIdsRef.current.add(order.id);
+      const now = Date.now();
+      // Optimistically reflect assignment in workingOrders for fair load distribution across batch
+      const target = workingOrders.find((o) => o.id === order.id);
+      if (target) {
+        target.status = 'assigned';
+        target.assignedRiderId = bestRider.id;
+      }
+
+      void ownerPatchOrder(order.id, {
+        status: 'assigned',
+        ownerApproved: true,
+        autoAssigned: true,
+        assignedRiderId: bestRider.id,
+        assignedRiderName: bestRider.name,
+        assignedRiderPhone: bestRider.mobile,
+        assignedRiderMobile: bestRider.mobile,
+        assignedAt: now,
+        timedOutAt: null,
+      })
+        .then(() => {
+          setToast(
+            `Auto-assigned ${order.id} to ${bestRider.name} (${bestRider.id}) — Rider App alerted.`
+          );
+        })
+        .catch(() => {
+          autoAssignedOrderIdsRef.current.delete(order.id);
+        });
+    }
+  }, [authenticated, storeSettings.autoAssign, orders, riders]);
+
+  const handleQuickToggleSetting = async (key: 'isOpen' | 'autoAssign') => {
+    setTogglingQuickKey(key);
+    try {
+      const nextVal = !storeSettings[key];
+      await updateStoreSettings({ [key]: nextVal });
+      if (key === 'isOpen') {
+        setToast(
+          nextVal
+            ? 'Store is now OPEN — accepting customer orders.'
+            : 'Store is now CLOSED — Customer App checkout disabled.'
+        );
+      } else {
+        setToast(
+          nextVal
+            ? 'Auto-Assign Online Rider: ON'
+            : 'Auto-Assign Online Rider: OFF (manual dispatch)'
+        );
+      }
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : 'Failed to update store setting.');
+    } finally {
+      setTogglingQuickKey(null);
+    }
+  };
 
   const handleStopRinging = () => {
     for (const id of knownPendingIdsRef.current) {
@@ -262,6 +415,7 @@ export function OwnerApp() {
         return;
       }
       silencedPendingIdsRef.current.clear();
+      saveOwnerSession();
       setAuthenticated(true);
       setPasswordInput('');
     } catch (err) {
@@ -351,9 +505,11 @@ export function OwnerApp() {
   // Prevent accidental app exit on Android hardware/gesture Back button
   const { exitPromptVisible } = useAndroidBackGuard({
     scope: 'owner',
-    hasOpenOverlay: Boolean(cleanupModalOpen || settingsOpen),
+    hasOpenOverlay: Boolean(mapModalTarget || cleanupModalOpen || settingsOpen),
     onCloseOverlay: () => {
-      if (cleanupModalOpen) {
+      if (mapModalTarget) {
+        setMapModalTarget(null);
+      } else if (cleanupModalOpen) {
         setCleanupModalOpen(false);
       } else if (settingsOpen) {
         setSettingsOpen(false);
@@ -405,7 +561,7 @@ export function OwnerApp() {
                 DailyDrop Owner
               </h1>
               <p className="text-xs text-slate-300">
-                Tolichowki Command Center
+                Store Command Center
               </p>
             </div>
           </div>
@@ -476,10 +632,12 @@ export function OwnerApp() {
     { key: 'riders', label: 'Riders & Duty', icon: Bike },
     { key: 'stock', label: 'Stock & Prices', icon: Package },
     { key: 'sales', label: 'Sales & Customers', icon: BarChart3 },
+    { key: 'store', label: 'Store & Fees', icon: SlidersHorizontal },
   ];
 
   return (
     <div className="app-scroll-page bg-slate-50 pb-safe-page">
+      <NetworkStatusBanner />
       {/* Owner Header */}
       <header className="sticky top-0 z-30 bg-slate-900 text-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
@@ -548,6 +706,7 @@ export function OwnerApp() {
               type="button"
               onClick={() => {
                 handleStopRinging();
+                clearOwnerSession();
                 setAuthenticated(false);
               }}
               aria-label="Sign out of Owner Controller"
@@ -595,17 +754,55 @@ export function OwnerApp() {
             </span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              handleStopRinging();
-              setToast('Order alert muted for current pending orders.');
-            }}
-            className="min-h-[38px] px-3 rounded-xl bg-slate-900 hover:bg-slate-950 border border-slate-700 text-slate-100 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
-          >
-            <BellOff className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-            <span>Mute Alert</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={togglingQuickKey === 'isOpen'}
+              data-testid="owner-quick-store-toggle"
+              onClick={() => void handleQuickToggleSetting('isOpen')}
+              className={`min-h-[38px] px-3 rounded-xl font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-60 ${
+                storeSettings.isOpen
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  : 'bg-red-600 hover:bg-red-500 text-white'
+              }`}
+            >
+              {storeSettings.isOpen ? (
+                <Store className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              ) : (
+                <Power className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              )}
+              <span>{storeSettings.isOpen ? 'Store Open' : 'Store Closed'}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={togglingQuickKey === 'autoAssign'}
+              data-testid="owner-quick-autoassign-toggle"
+              onClick={() => void handleQuickToggleSetting('autoAssign')}
+              className={`min-h-[38px] px-3 rounded-xl font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-60 ${
+                storeSettings.autoAssign
+                  ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                  : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>
+                Auto-Assign Online Rider: {storeSettings.autoAssign ? 'ON' : 'OFF'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                handleStopRinging();
+                setToast('Order alert muted for current pending orders.');
+              }}
+              className="min-h-[38px] px-3 rounded-xl bg-slate-900 hover:bg-slate-950 border border-slate-700 text-slate-100 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <BellOff className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>Mute Alert</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -706,11 +903,16 @@ export function OwnerApp() {
             riders={riders}
             completedCleanupCount={completedOrdersForCleanup.length}
             onOpenWeeklyCleanup={() => setCleanupModalOpen(true)}
+            onOpenMapModal={setMapModalTarget}
             onNotify={handleTabNotify}
           />
         )}
         {activeTab === 'riders' && (
-          <RidersTab riders={riders} onNotify={handleTabNotify} />
+          <RidersTab
+            riders={riders}
+            orders={orders}
+            onNotify={handleTabNotify}
+          />
         )}
         {activeTab === 'stock' && (
           <StockTab products={products} onNotify={handleTabNotify} />
@@ -719,6 +921,13 @@ export function OwnerApp() {
           <SalesCustomersTab
             orders={orders}
             customers={customers}
+            onNotify={handleTabNotify}
+          />
+        )}
+        {activeTab === 'store' && (
+          <StoreFeesTab
+            settings={storeSettings}
+            riders={riders}
             onNotify={handleTabNotify}
           />
         )}
@@ -997,6 +1206,11 @@ export function OwnerApp() {
         </div>
       )}
 
+      <InAppMapModal
+        target={mapModalTarget}
+        onClose={() => setMapModalTarget(null)}
+        onCopied={handleTabNotify}
+      />
       <CopyToast message={copyToast} />
       <BackExitToast visible={exitPromptVisible} />
     </div>

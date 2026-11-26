@@ -1,37 +1,51 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Banknote,
   Bell,
+  Building2,
   Calendar,
   Camera,
   CheckCircle2,
   Clock,
   Copy,
+  ExternalLink,
+  Headphones,
+  History,
   LocateFixed,
   MapPin,
   Minus,
+  MoreVertical,
   Navigation,
   Phone,
   Plus,
+  QrCode,
+  ShieldCheck,
   ShoppingBag,
   Sparkles,
   Truck,
+  User,
   X,
   Zap,
 } from 'lucide-react';
 import type {
+  CustomerProfile,
   CustomerRecord,
+  FloorLevel,
   GeoPoint,
   Order,
-  OrderItem,
+  PaymentMethod,
   Product,
   ProductCategory,
   RiderRecord,
   ServiceMode,
+  StoreSettings,
 } from '../types';
 import {
   dbGet,
+  deleteCustomerProfileData,
   ensureProductsSeeded,
+  getStoreSettings,
   placeCustomerOrder,
   sanitizeFirebaseKey,
   subscribePath,
@@ -39,7 +53,6 @@ import {
 import {
   calculateCartTotals,
   COD_DISPLAY_LABEL,
-  createOrderId,
   detectCustomerOrderChanges,
   EVENT_TIME_SLOTS,
   formatRupees,
@@ -56,9 +69,17 @@ import {
   type CustomerOrderSnapshot,
 } from '../utils/domain';
 import {
-  checkTolichowkiZone,
+  calculateOrderBillBreakdown,
+  DEFAULT_STORE_SETTINGS,
+  FLOOR_OPTIONS,
+  formatFloorLiftSummary,
+  normalizeStoreSettings,
+  STORE_CLOSED_BANNER_MESSAGE,
+} from '../utils/storeSettings';
+import {
+  checkDeliveryRadius,
   isValidGeoPoint,
-  type ZoneCheckResult,
+  type DeliveryRadiusCheck,
 } from '../utils/geo';
 import {
   buildPhoneCallUrl,
@@ -72,23 +93,84 @@ import {
   playCustomerStatusChime,
   unlockAudioContext,
 } from '../utils/sound';
+import {
+  buildUpiPaymentUri,
+  getAvailablePaymentOptions,
+  getOrderPaymentBadge,
+  isValidUtr,
+  sanitizeUtrInput,
+} from '../utils/payment';
+import {
+  clearCustomerProfile,
+  hasAcceptedGpsDisclosure,
+  loadCustomerProfile,
+  saveCustomerProfile,
+  saveGpsDisclosureAccepted,
+} from '../utils/sessionStorage';
+import { fetchLiveAreaName } from '../utils/reverseGeocode';
+import {
+  sanitizePhone10,
+  validateAndBuildCanonicalOrder,
+} from '../utils/security';
 import { ProductImage } from './ProductImage';
 import { BrandLogo } from './BrandLogo';
 import { LiveOrderMap } from './LiveOrderMap';
 import { PWAInstallButton } from './PWAInstallButton';
 import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
+import { NetworkStatusBanner } from './NetworkStatusBanner';
+import { UpiQrCode } from './UpiQrCode';
+import { GpsDisclosureModal } from './GpsDisclosureModal';
+import {
+  CustomerMenuPages,
+  type CustomerMenuPage,
+} from './customer/CustomerMenuPages';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 
 const CUSTOMER_MOBILE_KEY = 'dailydrop_customer_mobile';
 
-const STATUS_STEPS = [
-  { key: 'pending', label: 'Order Placed' },
-  { key: 'accepted', label: 'Rider Accepted' },
-  { key: 'reached_pickup', label: 'Reached Plant' },
-  { key: 'out_for_delivery', label: 'Out for Delivery' },
-  { key: 'delivered', label: 'Delivered' },
+const FLOOR_CHARGE_NOTE =
+  'ℹ️ Note: Extra floor charges apply when there is no lift (2nd Floor: +₹10, 3rd+ Floor: +₹20), already included in your total payable amount.';
+
+const LIVE_TRACKING_STEPS = [
+  { key: 'placed', label: '1. Order Placed' },
+  { key: 'out_for_delivery', label: '2. Out for Delivery' },
+  { key: 'delivered', label: '3. Delivered' },
 ] as const;
+
+async function copyPlainText(
+  text: string,
+  successMsg: string,
+  onFeedback: (msg: string) => void
+): Promise<boolean> {
+  const clean = text.trim();
+  if (!clean) return false;
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(clean);
+      onFeedback(successMsg);
+      return true;
+    }
+  } catch {
+    // Fallback below
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = clean;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    onFeedback(successMsg);
+    return true;
+  } catch {
+    onFeedback(`Copy failed. Value: ${clean}`);
+    return false;
+  }
+}
 
 interface CustomerAppProps {
   onOpenPrivacy?: () => void;
@@ -111,21 +193,51 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
 
   // Location verification & checkout GPS state
   const [locating, setLocating] = useState(false);
-  const [zoneResult, setZoneResult] = useState<ZoneCheckResult | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [customerLocation, setCustomerLocation] = useState<GeoPoint | null>(null);
+  const [outsideRadiusModal, setOutsideRadiusModal] =
+    useState<DeliveryRadiusCheck | null>(null);
+
+  // Saved Customer Profile & Three-Dots Menu state
+  const initialCustomerProfile = useMemo(() => loadCustomerProfile(), []);
+  const [customerProfile, setCustomerProfile] = useState<CustomerProfile | null>(
+    () => initialCustomerProfile
+  );
+  const [menuDropdownOpen, setMenuDropdownOpen] = useState(false);
+  const [activeMenuPage, setActiveMenuPage] = useState<CustomerMenuPage | null>(null);
+  const menuContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Checkout drawer state
   const [checkoutOpen, setCheckoutOpen] = useState(false);
-  const [customerName, setCustomerName] = useState('');
+  const [customerName, setCustomerName] = useState(
+    () => initialCustomerProfile?.name ?? ''
+  );
   const [customerMobile, setCustomerMobile] = useState(() => {
+    if (initialCustomerProfile?.mobile) return initialCustomerProfile.mobile;
     try {
       return window.sessionStorage.getItem(CUSTOMER_MOBILE_KEY) || '';
     } catch {
       return '';
     }
   });
-  const [address, setAddress] = useState('');
+  const [address, setAddress] = useState(
+    () => initialCustomerProfile?.address ?? ''
+  );
+  const [floorLevel, setFloorLevel] = useState<FloorLevel | null>(null);
+  const [hasLift, setHasLift] = useState<boolean | null>(null);
+  const [storeSettings, setStoreSettings] = useState<StoreSettings>(
+    DEFAULT_STORE_SETTINGS
+  );
+  const [selectedPaymentMethod, setSelectedPaymentMethod] =
+    useState<PaymentMethod>('Cash on Delivery');
+  const [upiUtr, setUpiUtr] = useState('');
+  const [gpsDisclosureAccepted, setGpsDisclosureAccepted] = useState<boolean>(
+    () => hasAcceptedGpsDisclosure()
+  );
+  const [gpsDisclosureOpen, setGpsDisclosureOpen] = useState<boolean>(false);
+  const [liveAreaName, setLiveAreaName] = useState<string | null>(null);
+  const [resolvingAreaName, setResolvingAreaName] = useState<boolean>(false);
+
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [submittingOrder, setSubmittingOrder] = useState(false);
   const [orderBanner, setOrderBanner] = useState<string | null>(null);
@@ -145,11 +257,12 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     }, 2200);
   };
 
-  // Orders & Riders live tracking
+  // Orders & Riders live tracking (accepts 10-digit mobile number OR Order ID)
   const [allOrders, setAllOrders] = useState<Order[]>([]);
   const [ordersLoaded, setOrdersLoaded] = useState(false);
   const [ridersMap, setRidersMap] = useState<Record<string, RiderRecord>>({});
   const [trackMobile, setTrackMobile] = useState(() => {
+    if (initialCustomerProfile?.mobile) return initialCustomerProfile.mobile;
     try {
       return window.sessionStorage.getItem(CUSTOMER_MOBILE_KEY) || '';
     } catch {
@@ -162,6 +275,21 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   const prevOrderSnapshotsRef = useRef<Record<string, CustomerOrderSnapshot>>({});
   const trackedMobileInitRef = useRef<string>('');
 
+  // Close three-dots dropdown when clicking outside
+  useEffect(() => {
+    if (!menuDropdownOpen) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (
+        menuContainerRef.current &&
+        !menuContainerRef.current.contains(e.target as Node)
+      ) {
+        setMenuDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [menuDropdownOpen]);
+
   // Unlock Web Audio automatically on customer's very first tap or keypress
   useEffect(() => {
     return installGlobalAudioUnlock();
@@ -170,16 +298,34 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   // Prevent accidental app exit on Android hardware/gesture Back button
   const { exitPromptVisible } = useAndroidBackGuard({
     scope: 'customer',
-    hasOpenOverlay: Boolean(zoomPhoto || checkoutOpen),
+    hasOpenOverlay: Boolean(
+      gpsDisclosureOpen ||
+        outsideRadiusModal ||
+        zoomPhoto ||
+        checkoutOpen ||
+        menuDropdownOpen
+    ),
     onCloseOverlay: () => {
-      if (zoomPhoto) {
+      if (gpsDisclosureOpen) {
+        setGpsDisclosureOpen(false);
+      } else if (outsideRadiusModal) {
+        setOutsideRadiusModal(null);
+      } else if (zoomPhoto) {
         setZoomPhoto(null);
+      } else if (menuDropdownOpen) {
+        setMenuDropdownOpen(false);
       } else if (checkoutOpen) {
         setCheckoutOpen(false);
       }
     },
-    isOnSubView: activeTab !== 'shop',
-    onReturnHome: () => setActiveTab('shop'),
+    isOnSubView: Boolean(activeMenuPage) || activeTab !== 'shop',
+    onReturnHome: () => {
+      if (activeMenuPage) {
+        setActiveMenuPage(null);
+      } else {
+        setActiveTab('shop');
+      }
+    },
   });
 
   // Live products subscription + auto-seeding if empty
@@ -242,11 +388,20 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       }
     );
 
+    const unsubStoreSettings = subscribePath<Partial<StoreSettings>>(
+      'storeSettings',
+      (data) => {
+        if (!mounted) return;
+        setStoreSettings(normalizeStoreSettings(data));
+      }
+    );
+
     return () => {
       mounted = false;
       unsubProducts();
       unsubOrders();
       unsubRiders();
+      unsubStoreSettings();
     };
   }, []);
 
@@ -260,24 +415,51 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     [cart, products]
   );
 
+  const normalizedTrackQuery = trackMobile.trim();
+  const trackQueryDigits = normalizedTrackQuery.replace(/\D/g, '');
+  const isTrackQueryValid =
+    (/^\d{10}$/.test(normalizedTrackQuery) ||
+      (trackQueryDigits.length === 10 && !/[a-zA-Z]/.test(normalizedTrackQuery))) ||
+    normalizedTrackQuery.length >= 4;
+
   const myOrders = useMemo(() => {
-    const cleanDigits = trackMobile.replace(/\D/g, '');
-    if (cleanDigits.length !== 10) return [];
-    return allOrders.filter(
-      (ord) => ord.customerMobile.replace(/\D/g, '') === cleanDigits
-    );
+    const trimmed = trackMobile.trim();
+    if (!trimmed) return [];
+    const digitsOnly = trimmed.replace(/\D/g, '');
+    if (digitsOnly.length === 10 && !/[a-zA-Z]/.test(trimmed)) {
+      return allOrders.filter(
+        (ord) => ord.customerMobile.replace(/\D/g, '') === digitsOnly
+      );
+    }
+    if (trimmed.length >= 4) {
+      const upper = trimmed.toUpperCase();
+      return allOrders.filter((ord) => ord.id.toUpperCase().includes(upper));
+    }
+    return [];
   }, [allOrders, trackMobile]);
+
+  const customerHistoryOrders = useMemo(() => {
+    const mobileToMatch = (
+      customerProfile?.mobile ||
+      (trackQueryDigits.length === 10 && !/[a-zA-Z]/.test(normalizedTrackQuery)
+        ? trackQueryDigits
+        : '')
+    ).replace(/\D/g, '');
+    if (mobileToMatch.length !== 10) return myOrders;
+    return allOrders.filter(
+      (ord) => ord.customerMobile.replace(/\D/g, '') === mobileToMatch
+    );
+  }, [allOrders, customerProfile?.mobile, myOrders, normalizedTrackQuery, trackQueryDigits]);
 
   const activeOrderCount = useMemo(
     () => myOrders.filter((o) => isActiveOrderStatus(o.status)).length,
     [myOrders]
   );
 
-  // Detect live 5-step order status transitions -> play loud 3-note chime + vibrate + banner
+  // Detect live order status transitions -> play loud 3-note chime + vibrate + banner
   useEffect(() => {
     if (!ordersLoaded) return;
-    const cleanDigits = trackMobile.replace(/\D/g, '');
-    if (cleanDigits.length !== 10) {
+    if (!isTrackQueryValid) {
       prevOrderSnapshotsRef.current = {};
       trackedMobileInitRef.current = '';
       return;
@@ -290,8 +472,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       };
     }
 
-    if (trackedMobileInitRef.current !== cleanDigits) {
-      trackedMobileInitRef.current = cleanDigits;
+    if (trackedMobileInitRef.current !== normalizedTrackQuery) {
+      trackedMobileInitRef.current = normalizedTrackQuery;
       prevOrderSnapshotsRef.current = nextSnapshots;
       return;
     }
@@ -306,9 +488,22 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     }
 
     prevOrderSnapshotsRef.current = nextSnapshots;
-  }, [myOrders, trackMobile, ordersLoaded]);
+  }, [myOrders, normalizedTrackQuery, isTrackQueryValid, ordersLoaded]);
 
-  const handleVerifyLocation = () => {
+  const resolveAreaFromCoords = (coords: GeoPoint) => {
+    setResolvingAreaName(true);
+    void fetchLiveAreaName(coords.lat, coords.lng)
+      .then((area) => {
+        if (area) {
+          setLiveAreaName(area);
+        }
+      })
+      .finally(() => {
+        setResolvingAreaName(false);
+      });
+  };
+
+  const executeGpsLookup = () => {
     setLocationError(null);
     if (!('geolocation' in navigator)) {
       setLocationError('GPS location is not supported on this browser.');
@@ -323,7 +518,13 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           lng: Number(pos.coords.longitude.toFixed(6)),
         };
         setCustomerLocation(coords);
-        setZoneResult(checkTolichowkiZone(coords.lat, coords.lng));
+        resolveAreaFromCoords(coords);
+        const check = checkDeliveryRadius(coords.lat, coords.lng, storeSettings);
+        if (check.blocked) {
+          setOutsideRadiusModal(check);
+        } else {
+          setOutsideRadiusModal(null);
+        }
         setFormErrors((prev) => {
           if (!prev.location) return prev;
           const next = { ...prev };
@@ -348,6 +549,21 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     );
   };
 
+  const handleVerifyLocation = () => {
+    if (!gpsDisclosureAccepted) {
+      setGpsDisclosureOpen(true);
+      return;
+    }
+    executeGpsLookup();
+  };
+
+  const handleAcceptGpsDisclosure = () => {
+    saveGpsDisclosureAccepted();
+    setGpsDisclosureAccepted(true);
+    setGpsDisclosureOpen(false);
+    executeGpsLookup();
+  };
+
   const updateCartQty = (product: Product, delta: number) => {
     setCart((prev) => {
       const current = prev[product.id] ?? 0;
@@ -362,16 +578,92 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     });
   };
 
+  const bill = useMemo(
+    () =>
+      calculateOrderBillBreakdown(subtotal, floorLevel, hasLift, storeSettings),
+    [subtotal, floorLevel, hasLift, storeSettings]
+  );
+
   const hasValidGps = isValidGeoPoint(customerLocation);
+  const radiusCheck = useMemo<DeliveryRadiusCheck | null>(() => {
+    if (!hasValidGps || !customerLocation) return null;
+    return checkDeliveryRadius(
+      customerLocation.lat,
+      customerLocation.lng,
+      storeSettings
+    );
+  }, [hasValidGps, customerLocation, storeSettings]);
+
+  const isOutsideDeliveryRadius = Boolean(radiusCheck?.blocked);
+
+  // Close outside-radius modal automatically if Owner disables radius limit or increases radius
+  useEffect(() => {
+    if (!radiusCheck?.blocked && outsideRadiusModal) {
+      setOutsideRadiusModal(null);
+    }
+  }, [radiusCheck?.blocked, outsideRadiusModal]);
+
+  const paymentAvailability = useMemo(
+    () => getAvailablePaymentOptions(storeSettings),
+    [storeSettings]
+  );
+
+  // Keep selected payment method synced with Owner's active UPI / COD switches
+  useEffect(() => {
+    if (paymentAvailability.checkoutDisabled) return;
+    if (
+      selectedPaymentMethod === 'UPI' &&
+      !paymentAvailability.upiEnabled &&
+      paymentAvailability.codEnabled
+    ) {
+      setSelectedPaymentMethod('Cash on Delivery');
+    } else if (
+      selectedPaymentMethod === 'Cash on Delivery' &&
+      !paymentAvailability.codEnabled &&
+      paymentAvailability.upiEnabled
+    ) {
+      setSelectedPaymentMethod('UPI');
+    }
+  }, [
+    paymentAvailability.checkoutDisabled,
+    paymentAvailability.codEnabled,
+    paymentAvailability.upiEnabled,
+    selectedPaymentMethod,
+  ]);
+
+  const upiPaymentUri = useMemo(() => {
+    if (!paymentAvailability.upiEnabled) return '';
+    return buildUpiPaymentUri(
+      storeSettings.upiId,
+      storeSettings.upiName,
+      bill.totalAmount
+    );
+  }, [
+    paymentAvailability.upiEnabled,
+    storeSettings.upiId,
+    storeSettings.upiName,
+    bill.totalAmount,
+  ]);
+
+  const isGpsRequiredAndMissing = storeSettings.radiusEnabled && !hasValidGps;
+  const isUpiMissingOrInvalidUtr =
+    selectedPaymentMethod === 'UPI' &&
+    paymentAvailability.upiEnabled &&
+    !isValidUtr(upiUtr);
+
   const hasRequiredCheckoutFields =
+    storeSettings.isOpen &&
+    !paymentAvailability.checkoutDisabled &&
     customerName.trim().length >= 2 &&
     /^\d{10}$/.test(customerMobile.replace(/\D/g, '')) &&
     address.trim().length >= 8 &&
+    Boolean(floorLevel) &&
+    typeof hasLift === 'boolean' &&
     (serviceMode !== 'events' || Boolean(eventDate.trim() && timeSlot.trim()));
 
-  // Silently attempt automatic optional GPS capture when checkout opens (never blocks order if WebView denies GPS)
+  // Only attempt automatic GPS capture when checkout opens AFTER prominent GPS disclosure is accepted
   useEffect(() => {
-    if (!checkoutOpen || hasValidGps || locating) return;
+    if (!checkoutOpen || !gpsDisclosureAccepted || hasValidGps || locating) return;
     if (typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
     let active = true;
     navigator.geolocation.getCurrentPosition(
@@ -382,109 +674,262 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           lng: Number(pos.coords.longitude.toFixed(6)),
         };
         setCustomerLocation(coords);
-        setZoneResult(checkTolichowkiZone(coords.lat, coords.lng));
+        resolveAreaFromCoords(coords);
+        const check = checkDeliveryRadius(coords.lat, coords.lng, storeSettings);
+        if (check.blocked) {
+          setOutsideRadiusModal(check);
+        }
       },
       () => {
-        // Optional GPS failed/denied in WebView — proceed seamlessly with address-only checkout
+        // User can tap "Share Current Location" manually
       },
       { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
     );
     return () => {
       active = false;
     };
-  }, [checkoutOpen, hasValidGps, locating]);
+  }, [checkoutOpen, gpsDisclosureAccepted, hasValidGps, locating, storeSettings]);
+
+  const handleSaveCustomerProfile = (
+    draft: Omit<CustomerProfile, 'updatedAt'>
+  ) => {
+    const saved = saveCustomerProfile(draft);
+    if (saved) {
+      setCustomerProfile(saved);
+      setCustomerName(saved.name);
+      setCustomerMobile(saved.mobile);
+      setAddress(saved.address);
+      setTrackMobile(saved.mobile);
+      try {
+        window.sessionStorage.setItem(CUSTOMER_MOBILE_KEY, saved.mobile);
+      } catch {
+        // ignore storage errors
+      }
+      showCopyToast('Profile saved!');
+    }
+  };
+
+  const handleCustomerLogout = () => {
+    clearCustomerProfile();
+    setCustomerProfile(null);
+    setCustomerName('');
+    setCustomerMobile('');
+    setAddress('');
+    setTrackMobile('');
+    setActiveMenuPage(null);
+    setActiveTab('shop');
+    try {
+      window.sessionStorage.removeItem(CUSTOMER_MOBILE_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    showCopyToast('Logged out successfully.');
+  };
+
+  const handleDeleteCustomerProfileData = async (rawMobile: string) => {
+    const cleanMobile = sanitizePhone10(rawMobile);
+    if (/^\d{10}$/.test(cleanMobile)) {
+      await deleteCustomerProfileData(cleanMobile);
+    }
+    clearCustomerProfile();
+    setCustomerProfile(null);
+    setCustomerName('');
+    setCustomerMobile('');
+    setAddress('');
+    setTrackMobile('');
+    setCustomerLocation(null);
+    setLiveAreaName(null);
+    try {
+      window.sessionStorage.removeItem(CUSTOMER_MOBILE_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    showCopyToast('Profile & personal data deleted.');
+  };
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     unlockAudioContext();
+
+    if (!storeSettings.isOpen) {
+      setFormErrors({ submit: STORE_CLOSED_BANNER_MESSAGE });
+      return;
+    }
+
+    if (paymentAvailability.checkoutDisabled) {
+      setFormErrors({
+        submit:
+          'Online ordering is temporarily paused because all payment methods are turned OFF by the store.',
+      });
+      return;
+    }
+
+    // Strict Delivery Radius enforcement: NEVER bypass validation if GPS is unavailable when radiusEnabled is ON
+    if (storeSettings.radiusEnabled) {
+      if (!customerLocation || !isValidGeoPoint(customerLocation)) {
+        setFormErrors({
+          location: `GPS location is required to verify you are within our ${storeSettings.deliveryRadiusKm} km delivery radius. Tap "Share Current Location" first.`,
+          submit: `Please share your live GPS location to verify you are within our ${storeSettings.deliveryRadiusKm} km delivery radius.`,
+        });
+        return;
+      }
+      const localRadiusCheck = checkDeliveryRadius(
+        customerLocation.lat,
+        customerLocation.lng,
+        storeSettings
+      );
+      if (localRadiusCheck.blocked) {
+        setOutsideRadiusModal(localRadiusCheck);
+        setFormErrors({ submit: localRadiusCheck.modalMessage });
+        return;
+      }
+    }
+
     const errors = validateCheckoutInput({
       customerName,
       customerMobile,
       address,
       customerLat: customerLocation?.lat ?? null,
       customerLng: customerLocation?.lng ?? null,
+      floorLevel,
+      hasLift,
       serviceMode,
       eventDate,
       timeSlot,
       itemCount,
     });
+
+    const activePaymentMethod: PaymentMethod =
+      selectedPaymentMethod === 'UPI' && paymentAvailability.upiEnabled
+        ? 'UPI'
+        : 'Cash on Delivery';
+
+    const cleanUtr = sanitizeUtrInput(upiUtr);
+    if (activePaymentMethod === 'UPI' && !isValidUtr(cleanUtr)) {
+      errors.upiUtr =
+        'Enter the exact 12-digit UTR / transaction reference number after paying via UPI.';
+    }
+
     setFormErrors(errors);
     if (Object.keys(errors).length > 0) return;
 
-    const cleanMobile = sanitizeFirebaseKey(customerMobile.replace(/\D/g, ''));
-    const productMap = new Map(products.map((p) => [p.id, p]));
-    const items: OrderItem[] = [];
-    for (const [productId, qty] of Object.entries(cart)) {
-      const p = productMap.get(productId);
-      if (p && qty > 0) {
-        items.push({
-          productId: p.id,
-          name: p.name,
-          price: p.price,
-          quantity: qty,
-          category: p.category,
-        });
-      }
-    }
-
-    if (items.length === 0) {
-      setFormErrors({ cart: 'Please add at least one item to your cart.' });
-      return;
-    }
-
+    const cleanMobile = sanitizeFirebaseKey(sanitizePhone10(customerMobile));
     setSubmittingOrder(true);
     try {
-      const existingCustomer = await dbGet<CustomerRecord>(
-        `customers/${cleanMobile}`
-      ).catch(() => null);
+      const [
+        freshSettings,
+        freshProductsRaw,
+        existingCustomer,
+        freshRidersRaw,
+        freshOrdersRaw,
+      ] = await Promise.all([
+        getStoreSettings().catch(() => storeSettings),
+        dbGet<Record<string, Product>>('products').catch(() => null),
+        dbGet<CustomerRecord>(`customers/${cleanMobile}`).catch(() => null),
+        dbGet<Record<string, RiderRecord>>('riders').catch(() => ridersMap),
+        dbGet<Record<string, Order>>('orders').catch(() => null),
+      ]);
 
-      const now = Date.now();
-      const orderId = createOrderId(now);
-      const newOrder: Order = {
-        id: orderId,
-        customerName: customerName.trim(),
+      setStoreSettings(freshSettings);
+
+      const authoritativeCatalog: Product[] =
+        freshProductsRaw && Object.keys(freshProductsRaw).length > 0
+          ? Object.entries(freshProductsRaw).map(([id, p]) => ({
+              ...p,
+              id: p.id || id,
+            }))
+          : products;
+
+      const ridersList = freshRidersRaw
+        ? Object.entries(freshRidersRaw).map(([id, r]) => ({
+            ...r,
+            id: r.id || id,
+          }))
+        : Object.entries(ridersMap).map(([id, r]) => ({
+            ...r,
+            id: r.id || id,
+          }));
+
+      const ordersList = freshOrdersRaw
+        ? Object.entries(freshOrdersRaw).map(([id, o]) => ({
+            ...o,
+            id: o.id || id,
+          }))
+        : allOrders;
+
+      if (freshSettings.radiusEnabled && customerLocation && isValidGeoPoint(customerLocation)) {
+        const freshRadiusCheck = checkDeliveryRadius(
+          customerLocation.lat,
+          customerLocation.lng,
+          freshSettings
+        );
+        if (freshRadiusCheck.blocked) {
+          setOutsideRadiusModal(freshRadiusCheck);
+          setFormErrors({ submit: freshRadiusCheck.modalMessage });
+          return;
+        }
+      }
+
+      const canonical = validateAndBuildCanonicalOrder({
+        cart,
+        catalog: authoritativeCatalog,
+        storeSettings: freshSettings,
+        customerName,
         customerMobile: cleanMobile,
-        address: address.trim(),
-        customerLat: customerLocation ? customerLocation.lat : null,
-        customerLng: customerLocation ? customerLocation.lng : null,
-        customerLocation: customerLocation ?? null,
-        gpsStatus: customerLocation ? 'captured' : 'address_only',
-        ownerApproved: false,
+        address,
+        customerLocation,
+        floorLevel,
+        hasLift,
         serviceMode,
-        eventDetails:
-          serviceMode === 'events'
-            ? {
-                eventDate: eventDate.trim(),
-                timeSlot: timeSlot.trim(),
-                notes: eventNotes.trim(),
-              }
-            : null,
-        paymentMethod: 'Cash on Delivery',
-        items,
-        totalAmount: subtotal,
-        status: 'pending',
-        assignedRiderId: null,
-        assignedRiderName: null,
-        assignedRiderMobile: null,
-        createdAt: now,
-        updatedAt: now,
-        deliveredAt: null,
-      };
+        eventDate,
+        timeSlot,
+        eventNotes,
+        paymentMethod: activePaymentMethod,
+        upiUtr: cleanUtr,
+        riders: ridersList,
+        existingOrders: ordersList,
+      });
+
+      if (!canonical.ok) {
+        setFormErrors({
+          [canonical.field || 'submit']: canonical.error,
+          submit: canonical.error,
+        });
+        return;
+      }
+
+      const { order: newOrder, autoAssignedRider } = canonical;
 
       await placeCustomerOrder(newOrder, existingCustomer);
 
+      const savedProfile = saveCustomerProfile({
+        name: newOrder.customerName,
+        mobile: newOrder.customerMobile,
+        address: newOrder.address,
+      });
+      if (savedProfile) {
+        setCustomerProfile(savedProfile);
+      }
+
       try {
-        window.sessionStorage.setItem(CUSTOMER_MOBILE_KEY, cleanMobile);
+        window.sessionStorage.setItem(CUSTOMER_MOBILE_KEY, newOrder.customerMobile);
       } catch {
         // ignore storage restrictions
       }
 
-      setTrackMobile(cleanMobile);
+      setTrackMobile(newOrder.customerMobile);
       setCart({});
+      setUpiUtr('');
       setCheckoutOpen(false);
       setActiveTab('orders');
+      const paySummary =
+        newOrder.paymentMethod === 'UPI'
+          ? `UPI PAYMENT PENDING (UTR: ${newOrder.upiUtr})`
+          : COD_DISPLAY_LABEL;
       setOrderBanner(
-        `Order ${orderId} placed! ${COD_DISPLAY_LABEL} · Total ${formatRupees(subtotal)}.`
+        autoAssignedRider
+          ? `Order ${newOrder.id} placed & assigned to ${autoAssignedRider.name} (${autoAssignedRider.id})! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
+          : `Order ${newOrder.id} placed! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
       );
     } catch (err) {
       setFormErrors({
@@ -498,9 +943,32 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     }
   };
 
+  if (activeMenuPage) {
+    return (
+      <div className="app-scroll-page bg-slate-50">
+        <NetworkStatusBanner />
+        <CustomerMenuPages
+          page={activeMenuPage}
+          profile={customerProfile}
+          orders={customerHistoryOrders}
+          trackMobile={customerProfile?.mobile || trackQueryDigits}
+          onBack={() => setActiveMenuPage(null)}
+          onSaveProfile={handleSaveCustomerProfile}
+          onLogout={handleCustomerLogout}
+          onDeleteProfileData={handleDeleteCustomerProfileData}
+          onCopyFeedback={showCopyToast}
+          onOpenFullPrivacy={onOpenPrivacy}
+        />
+        <CopyToast message={copyToast} />
+        <BackExitToast visible={exitPromptVisible} />
+      </div>
+    );
+  }
+
   return (
     <div className="app-scroll-page bg-slate-50 pb-safe-bar">
-      {/* Compact Sticky Top Header (Single-row, clean brand + My Orders tab) */}
+      <NetworkStatusBanner />
+      {/* Compact Sticky Top Header (Brand + Order Now / My Orders + Three-Dots Menu) */}
       <header className="sticky top-0 z-30 bg-blue-800 text-white shadow-sm">
         <div className="max-w-6xl mx-auto px-3 sm:px-6 min-h-[60px] py-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
@@ -510,42 +978,139 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 DailyDrop Water
               </span>
               <span className="text-[10px] sm:text-xs text-cyan-200 font-medium block leading-tight truncate">
-                Water &amp; Cold Drinks Delivery • Tolichowki, Hyderabad
+                {liveAreaName
+                  ? `Water & Cold Drinks · ${liveAreaName}`
+                  : 'Water & Cold Drinks Delivery'}
               </span>
             </div>
           </div>
 
-          <nav aria-label="DailyDrop Water sections" className="flex items-center gap-1 bg-blue-900/70 p-1 rounded-xl shrink-0">
-            <button
-              type="button"
-              onClick={() => setActiveTab('shop')}
-              className={`min-h-[36px] px-2.5 sm:px-3.5 rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap transition-colors cursor-pointer ${
-                activeTab === 'shop'
-                  ? 'bg-white text-blue-900'
-                  : 'text-blue-100 hover:text-white'
-              }`}
-            >
-              Order Now
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('orders')}
-              className={`min-h-[36px] px-2.5 sm:px-3.5 rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1.5 ${
-                activeTab === 'orders'
-                  ? 'bg-white text-blue-900'
-                  : 'text-blue-100 hover:text-white'
-              }`}
-            >
-              <span>My Orders</span>
-              {activeOrderCount > 0 && (
-                <span className="tabular-nums text-[11px] font-bold px-1.5 py-0.5 rounded bg-cyan-500 text-white">
-                  {activeOrderCount}
-                </span>
+          <div className="flex items-center gap-1 shrink-0">
+            <nav aria-label="DailyDrop Water sections" className="flex items-center gap-0.5 sm:gap-1 bg-blue-900/70 p-0.5 sm:p-1 rounded-xl shrink-0">
+              <button
+                type="button"
+                onClick={() => setActiveTab('shop')}
+                className={`min-h-[36px] px-2 sm:px-3.5 rounded-lg text-[11px] sm:text-sm font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                  activeTab === 'shop'
+                    ? 'bg-white text-blue-900'
+                    : 'text-blue-100 hover:text-white'
+                }`}
+              >
+                Order Now
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('orders')}
+                className={`min-h-[36px] px-2 sm:px-3.5 rounded-lg text-[11px] sm:text-sm font-semibold whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
+                  activeTab === 'orders'
+                    ? 'bg-white text-blue-900'
+                    : 'text-blue-100 hover:text-white'
+                }`}
+              >
+                <span>My Orders</span>
+                {activeOrderCount > 0 && (
+                  <span className="tabular-nums text-[10px] sm:text-[11px] font-bold px-1.5 py-0.5 rounded bg-cyan-500 text-white">
+                    {activeOrderCount}
+                  </span>
+                )}
+              </button>
+            </nav>
+
+            {/* Customer Three-Dots Menu (⋮) */}
+            <div ref={menuContainerRef} className="relative">
+              <button
+                type="button"
+                data-testid="customer-menu-btn"
+                aria-label="Open customer menu"
+                aria-haspopup="menu"
+                aria-expanded={menuDropdownOpen}
+                onClick={() => setMenuDropdownOpen((prev) => !prev)}
+                className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-blue-900/70 hover:bg-blue-900 text-white flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <MoreVertical className="w-5 h-5" aria-hidden="true" />
+              </button>
+
+              {menuDropdownOpen && (
+                <div
+                  role="menu"
+                  data-testid="customer-menu-dropdown"
+                  className="absolute right-0 mt-2 w-60 bg-white text-slate-900 rounded-2xl border border-slate-200 shadow-xl py-1.5 z-50"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="menu-item-profile"
+                    onClick={() => {
+                      setMenuDropdownOpen(false);
+                      setActiveMenuPage('profile');
+                    }}
+                    className="w-full min-h-[44px] px-4 text-left text-sm font-semibold text-slate-800 hover:bg-blue-50 flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <User className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
+                    <span>Profile &amp; Login / Logout</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="menu-item-history"
+                    onClick={() => {
+                      setMenuDropdownOpen(false);
+                      setActiveMenuPage('history');
+                    }}
+                    className="w-full min-h-[44px] px-4 text-left text-sm font-semibold text-slate-800 hover:bg-blue-50 flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <History className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
+                    <span>Order History</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="menu-item-privacy"
+                    onClick={() => {
+                      setMenuDropdownOpen(false);
+                      setActiveMenuPage('privacy');
+                    }}
+                    className="w-full min-h-[44px] px-4 text-left text-sm font-semibold text-slate-800 hover:bg-blue-50 flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />
+                    <span>Privacy &amp; Data Policy</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="menu-item-support"
+                    onClick={() => {
+                      setMenuDropdownOpen(false);
+                      setActiveMenuPage('support');
+                    }}
+                    className="w-full min-h-[44px] px-4 text-left text-sm font-semibold text-slate-800 hover:bg-blue-50 flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <Headphones className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                    <span>Customer Support</span>
+                  </button>
+                </div>
               )}
-            </button>
-          </nav>
+            </div>
+          </div>
         </div>
       </header>
+
+      {/* Manual Store Closed Red Banner */}
+      {!storeSettings.isOpen && (
+        <div
+          role="alert"
+          data-testid="store-closed-banner"
+          className="bg-red-600 text-white border-b border-red-700"
+        >
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-2.5 text-sm font-bold">
+            <AlertTriangle className="w-5 h-5 shrink-0 text-red-100" aria-hidden="true" />
+            <span>{STORE_CLOSED_BANNER_MESSAGE}</span>
+          </div>
+        </div>
+      )}
 
       {/* Prominent Live Order Status Alert Banner */}
       {liveStatusAlert && (
@@ -589,14 +1154,27 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         </div>
       )}
 
-      {/* Tolichowki 3 km Zone Banner & Location Check */}
+      {/* Live GPS Area Banner & Delivery Radius Check */}
       <section className="bg-gradient-to-b from-blue-800 to-blue-700 text-white">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 pt-3 pb-6">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-              <p className="text-cyan-200 text-xs sm:text-sm font-semibold flex items-center gap-1.5">
+              <p
+                data-testid="live-area-banner"
+                className="text-cyan-200 text-xs sm:text-sm font-semibold flex items-center gap-1.5"
+              >
                 <MapPin className="w-4 h-4 shrink-0" aria-hidden="true" />
-                Delivering in Tolichowki (Within 3 km Radius)
+                <span>
+                  {resolvingAreaName
+                    ? 'Detecting your live GPS area…'
+                    : liveAreaName
+                      ? storeSettings.radiusEnabled
+                        ? `Delivering in ${liveAreaName} (Within ${storeSettings.deliveryRadiusKm} km Radius)`
+                        : `Delivering in ${liveAreaName}`
+                      : storeSettings.radiusEnabled
+                        ? `Delivering Near You (Within ${storeSettings.deliveryRadiusKm} km Radius)`
+                        : 'Fast Local Water & Cold Drinks Delivery'}
+                </span>
               </p>
               <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight mt-1 text-balance">
                 Pure Water Cans &amp; Chilled Drinks at Your Door
@@ -605,6 +1183,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
 
             <button
               type="button"
+              data-testid="verify-location-btn"
               onClick={handleVerifyLocation}
               disabled={locating}
               className="min-h-[46px] px-4 py-2.5 rounded-xl bg-cyan-400 hover:bg-cyan-300 active:scale-[0.99] text-blue-950 font-bold text-sm flex items-center justify-center gap-2 transition-all shrink-0 cursor-pointer disabled:opacity-70"
@@ -614,28 +1193,39 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
             </button>
           </div>
 
-          {zoneResult && (
+          {radiusCheck && (
             <div
               role="status"
               className={`mt-4 rounded-xl px-4 py-3 text-sm font-medium flex items-center gap-2.5 ${
-                zoneResult.withinZone
+                !radiusCheck.blocked
                   ? 'bg-emerald-500/20 border border-emerald-300/50 text-emerald-50'
-                  : 'bg-amber-500/20 border border-amber-300/50 text-amber-50'
+                  : 'bg-red-500/25 border border-red-300/60 text-red-50'
               }`}
             >
-              <CheckCircle2 className="w-5 h-5 shrink-0" aria-hidden="true" />
-              {zoneResult.withinZone ? (
+              {!radiusCheck.blocked ? (
+                <CheckCircle2 className="w-5 h-5 shrink-0" aria-hidden="true" />
+              ) : (
+                <AlertTriangle className="w-5 h-5 shrink-0" aria-hidden="true" />
+              )}
+              {!radiusCheck.radiusEnabled ? (
                 <span>
-                  Within 3 km Fast Delivery Zone · You are{' '}
-                  <strong className="tabular-nums">{zoneResult.formattedDistance}</strong>{' '}
-                  from Tolichowki Center.
+                  Delivery Radius Limit is OFF · You are{' '}
+                  <strong className="tabular-nums">{radiusCheck.formattedDistance}</strong>{' '}
+                  from our store.
+                </span>
+              ) : radiusCheck.withinRadius ? (
+                <span>
+                  Within {radiusCheck.maxRadiusKm} km Fast Delivery Zone · You are{' '}
+                  <strong className="tabular-nums">{radiusCheck.formattedDistance}</strong>{' '}
+                  from our store.
                 </span>
               ) : (
                 <span>
-                  You are currently{' '}
-                  <strong className="tabular-nums">{zoneResult.formattedDistance}</strong>{' '}
-                  from Tolichowki Center (outside our 3 km instant delivery radius). You can
-                  still schedule bulk Event Supply or enter a Tolichowki drop address.
+                  🚫 Outside Delivery Radius — We currently deliver only within a{' '}
+                  <strong className="tabular-nums">{radiusCheck.maxRadiusKm} km</strong>{' '}
+                  radius. Your location is{' '}
+                  <strong className="tabular-nums">{radiusCheck.formattedDistance}</strong>{' '}
+                  away.
                 </span>
               )}
             </div>
@@ -971,26 +1561,22 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           <section aria-label="My Orders" className="max-w-3xl mx-auto">
             <div className="bg-white rounded-2xl border border-slate-200 p-5 mb-5">
               <h2 className="font-display text-xl font-bold text-slate-900 mb-1">
-                Track Your DailyDrop Orders
+                Live Order Tracking
               </h2>
               <p className="text-sm text-slate-600 mb-4">
-                Enter your 10-digit mobile number to follow live delivery status and
-                contact your assigned Tolichowki rider.
+                Enter your 10-digit mobile number or Order ID (e.g. DD-...) to follow
+                live delivery status and contact your assigned delivery rider.
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
                 <label htmlFor="track-mobile-input" className="sr-only">
-                  10-digit mobile number
+                  10-digit mobile number or Order ID
                 </label>
                 <input
                   id="track-mobile-input"
-                  type="tel"
-                  inputMode="numeric"
-                  maxLength={10}
+                  type="text"
                   value={trackMobile}
-                  onChange={(e) =>
-                    setTrackMobile(e.target.value.replace(/\D/g, '').slice(0, 10))
-                  }
-                  placeholder="Enter 10-digit mobile number"
+                  onChange={(e) => setTrackMobile(e.target.value.slice(0, 32))}
+                  placeholder="Enter 10-digit phone number or Order ID (DD-...)"
                   className="flex-1 min-h-[46px] px-4 rounded-xl border border-slate-300 text-base text-slate-900 tabular-nums focus:outline-none focus:border-blue-700"
                 />
                 <button
@@ -1003,11 +1589,11 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
               </div>
             </div>
 
-            {trackMobile.replace(/\D/g, '').length !== 10 ? (
+            {!isTrackQueryValid ? (
               <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
                 <Truck className="w-10 h-10 text-blue-700 mx-auto mb-3" aria-hidden="true" />
                 <p className="font-semibold text-slate-900">
-                  Enter your 10-digit mobile number above
+                  Enter your 10-digit phone number or Order ID above
                 </p>
                 <p className="text-sm text-slate-500 mt-1">
                   Orders placed from this phone appear here automatically in real time.
@@ -1017,7 +1603,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
               <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
                 <ShoppingBag className="w-10 h-10 text-slate-400 mx-auto mb-3" aria-hidden="true" />
                 <p className="font-semibold text-slate-900">
-                  No orders found for {trackMobile}
+                  No orders found for &ldquo;{normalizedTrackQuery}&rdquo;
                 </p>
                 <p className="text-sm text-slate-500 mt-1">
                   Place a fast home delivery or event water supply order to track it live.
@@ -1027,14 +1613,15 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
               <div className="space-y-4">
                 {myOrders.map((order) => {
                   const canonicalStatus = normalizeOrderStatus(order.status);
-                  const trackerKey =
-                    canonicalStatus === 'assigned' || canonicalStatus === 'unassigned'
-                      ? 'pending'
-                      : canonicalStatus;
-                  const stepIdx = STATUS_STEPS.findIndex(
-                    (s) => s.key === trackerKey
-                  );
+                  const liveStepIdx =
+                    canonicalStatus === 'delivered'
+                      ? 2
+                      : canonicalStatus === 'out_for_delivery'
+                        ? 1
+                        : 0;
+                  const paymentBadge = getOrderPaymentBadge(order);
                   const riderMobile =
+                    order.assignedRiderPhone ||
                     order.assignedRiderMobile ||
                     (order.assignedRiderId
                       ? ridersMap[order.assignedRiderId]?.mobile
@@ -1061,12 +1648,14 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   return (
                     <article
                       key={order.id}
+                      data-testid={`customer-order-card-${order.id}`}
                       className="bg-white rounded-2xl border border-slate-200 p-5"
                     >
-                      <div className="flex flex-wrap items-start justify-between gap-2 pb-3 border-b border-slate-100">
-                        <div>
+                      <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100">
+                        <div className="min-w-0">
                           <div className="text-xs text-slate-500 font-medium tabular-nums">
-                            {order.id} · {formatTimestamp(order.createdAt)} ·{' '}
+                            Order ID: <strong className="text-slate-700">{order.id}</strong> ·{' '}
+                            {formatTimestamp(order.createdAt)} ·{' '}
                             {order.serviceMode === 'events'
                               ? 'Events Supply'
                               : 'Fast Delivery'}
@@ -1075,29 +1664,44 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                             {getStatusLabel(order.status)}
                           </h3>
                         </div>
-                        <div className="font-display text-lg font-extrabold text-blue-800 tabular-nums">
-                          {formatRupees(order.totalAmount)}
+                        <div className="text-right shrink-0">
+                          <div className="font-display text-lg font-extrabold text-blue-800 tabular-nums">
+                            {formatRupees(order.totalAmount)}
+                          </div>
+                          <span
+                            data-testid={`customer-payment-badge-${order.id}`}
+                            className={`inline-block mt-1 px-2 py-0.5 rounded-md text-[10px] sm:text-[11px] font-bold border whitespace-nowrap ${
+                              paymentBadge.kind === 'upi_pending'
+                                ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                            }`}
+                          >
+                            {paymentBadge.label}
+                          </span>
                         </div>
                       </div>
 
-                      {/* Live 5-Step Progress Tracker */}
+                      {/* Live 3-Step Order Progress Tracker */}
                       {canonicalStatus !== 'rejected' ? (
-                        <div className="py-4">
-                          <div className="grid grid-cols-5 gap-1.5">
-                            {STATUS_STEPS.map((step, idx) => {
-                              const completed = stepIdx >= idx;
-                              const isCurrent = stepIdx === idx;
+                        <div
+                          data-testid={`customer-order-steps-${order.id}`}
+                          className="py-4"
+                        >
+                          <div className="grid grid-cols-3 gap-2">
+                            {LIVE_TRACKING_STEPS.map((step, idx) => {
+                              const completed = liveStepIdx >= idx;
+                              const isCurrent = liveStepIdx === idx;
                               return (
                                 <div key={step.key} className="text-center">
                                   <div
-                                    className={`h-2 rounded-full mb-2 transition-colors ${
+                                    className={`h-2.5 rounded-full mb-2 transition-colors ${
                                       completed ? 'bg-blue-700' : 'bg-slate-200'
                                     }`}
                                   />
                                   <span
-                                    className={`text-[10px] sm:text-xs font-semibold block leading-tight ${
+                                    className={`text-xs font-bold block leading-tight ${
                                       isCurrent
-                                        ? 'text-blue-700 font-extrabold'
+                                        ? 'text-blue-700'
                                         : completed
                                           ? 'text-blue-950'
                                           : 'text-slate-400'
@@ -1250,17 +1854,85 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                         </div>
                       )}
 
-                      {/* Items & Delivery Details */}
-                      <div className="pt-3 border-t border-slate-100 text-sm text-slate-700 space-y-1.5">
-                        <div className="font-medium text-slate-900">
-                          {order.items
-                            .map((i) => `${i.quantity} × ${i.name}`)
-                            .join(' · ')}
+                      {/* Item-wise Bill Breakdown & Delivery Details */}
+                      <div className="pt-3 border-t border-slate-100 text-sm text-slate-700 space-y-2.5">
+                        <div
+                          data-testid={`customer-order-bill-${order.id}`}
+                          className="rounded-xl bg-slate-50 border border-slate-200 p-3 space-y-1.5 text-xs"
+                        >
+                          <p className="font-bold text-slate-800 uppercase tracking-wide text-[11px]">
+                            Item-wise Bill Breakdown
+                          </p>
+                          {order.items.map((item) => (
+                            <div
+                              key={`${order.id}-${item.productId}`}
+                              className="flex items-center justify-between text-slate-800 font-medium"
+                            >
+                              <span>
+                                {item.quantity} × {item.name}
+                              </span>
+                              <span className="font-semibold tabular-nums">
+                                {formatRupees(item.price * item.quantity)}
+                              </span>
+                            </div>
+                          ))}
+
+                          <div className="pt-1.5 mt-1.5 border-t border-slate-200 space-y-1 text-slate-600">
+                            {(order.platformFee ?? 0) > 0 && (
+                              <div className="flex items-center justify-between">
+                                <span>Platform Fee</span>
+                                <span className="font-semibold text-slate-800 tabular-nums">
+                                  {formatRupees(order.platformFee!)}
+                                </span>
+                              </div>
+                            )}
+                            {(order.deliveryFee ?? 0) > 0 && (
+                              <div className="flex items-center justify-between">
+                                <span>Delivery Fee</span>
+                                <span className="font-semibold text-slate-800 tabular-nums">
+                                  {formatRupees(order.deliveryFee!)}
+                                </span>
+                              </div>
+                            )}
+                            <div className="flex items-center justify-between">
+                              <span>
+                                Floor Charge
+                                {formatFloorLiftSummary(order)
+                                  ? ` (${formatFloorLiftSummary(order)})`
+                                  : ''}
+                              </span>
+                              <span
+                                className={`font-semibold tabular-nums ${
+                                  (order.floorCharge ?? 0) > 0
+                                    ? 'text-amber-800 font-bold'
+                                    : 'text-emerald-700'
+                                }`}
+                              >
+                                {(order.floorCharge ?? 0) > 0
+                                  ? `+${formatRupees(order.floorCharge!)}`
+                                  : '₹0'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="pt-1.5 mt-1.5 border-t border-slate-200 flex items-center justify-between text-sm font-extrabold text-slate-900">
+                            <span>Total Payable Amount</span>
+                            <span className="text-blue-800 tabular-nums">
+                              {formatRupees(order.totalAmount)}
+                            </span>
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-500 flex items-center gap-1.5">
-                          <MapPin className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+
+                        <div className="text-xs text-slate-600 flex items-start gap-1.5">
+                          <MapPin className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />
                           <span>{order.address}</span>
                         </div>
+                        {formatFloorLiftSummary(order) && (
+                          <div className="text-xs text-slate-700 font-semibold flex items-center gap-1.5">
+                            <Building2 className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
+                            <span>Floor &amp; Lift: {formatFloorLiftSummary(order)}</span>
+                          </div>
+                        )}
                         {order.eventDetails && (
                           <div className="text-xs text-cyan-800 font-medium flex items-center gap-1.5">
                             <Clock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
@@ -1273,10 +1945,21 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                             </span>
                           </div>
                         )}
-                        <div className="text-xs text-slate-600 font-semibold flex items-center gap-1.5">
-                          <Banknote className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-hidden="true" />
-                          <span>Payment: {COD_DISPLAY_LABEL}</span>
+                        <div className="text-xs text-slate-700 font-semibold flex items-center gap-1.5">
+                          <Banknote
+                            className={`w-3.5 h-3.5 shrink-0 ${
+                              paymentBadge.kind === 'upi_pending'
+                                ? 'text-amber-700'
+                                : 'text-emerald-700'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span>Payment: {paymentBadge.label}</span>
                         </div>
+
+                        <p className="rounded-xl bg-blue-50/80 border border-blue-200 px-3 py-2 text-[11px] font-medium text-blue-950 leading-relaxed">
+                          {FLOOR_CHARGE_NOTE}
+                        </p>
                       </div>
                     </article>
                   );
@@ -1293,7 +1976,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           <div className="text-center sm:text-left">
             <p className="font-bold text-slate-800">DailyDrop Water</p>
             <p className="mt-0.5">
-              Water &amp; Cold Drinks Delivery • Tolichowki, Hyderabad
+              Water &amp; Cold Drinks Delivery · Fast Doorstep Supply
             </p>
           </div>
 
@@ -1363,7 +2046,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   Complete Your Order
                 </h2>
                 <p className="text-xs text-slate-500 tabular-nums">
-                  {itemCount} items · Total {formatRupees(subtotal)}
+                  {itemCount} items · Total {formatRupees(bill.totalAmount)}
                 </p>
               </div>
               <button
@@ -1377,8 +2060,21 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
             </div>
 
             <form onSubmit={handlePlaceOrder} className="p-5 space-y-4" noValidate>
-              {/* Cart Summary */}
-              <div className="bg-slate-50 rounded-xl p-3.5 space-y-1.5">
+              {!storeSettings.isOpen && (
+                <div
+                  role="alert"
+                  className="rounded-xl bg-red-50 border border-red-300 px-3.5 py-3 text-xs sm:text-sm font-bold text-red-800 flex items-start gap-2"
+                >
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" aria-hidden="true" />
+                  <span>{STORE_CLOSED_BANNER_MESSAGE}</span>
+                </div>
+              )}
+
+              {/* Cart Items & Full Bill Breakdown */}
+              <div
+                data-testid="checkout-bill-breakdown"
+                className="bg-slate-50 rounded-xl border border-slate-200 p-3.5 space-y-1.5"
+              >
                 {Object.entries(cart).map(([productId, qty]) => {
                   const p = products.find((item) => item.id === productId);
                   if (!p || qty <= 0) return null;
@@ -1396,12 +2092,50 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                     </div>
                   );
                 })}
+
+                <div className="pt-2 mt-2 border-t border-slate-200 space-y-1 text-xs text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span>Items Subtotal</span>
+                    <span className="font-semibold text-slate-800 tabular-nums">
+                      {formatRupees(bill.itemsSubtotal)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Platform Fee</span>
+                    <span className="font-semibold text-slate-800 tabular-nums">
+                      {bill.platformFee > 0 ? formatRupees(bill.platformFee) : '₹0'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Delivery Fee</span>
+                    <span className="font-semibold text-slate-800 tabular-nums">
+                      {bill.deliveryFee > 0 ? formatRupees(bill.deliveryFee) : '₹0'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Floor Charge</span>
+                    <span
+                      className={`font-semibold tabular-nums ${
+                        bill.floorCharge > 0 ? 'text-amber-800 font-bold' : 'text-emerald-700'
+                      }`}
+                    >
+                      {bill.floorCharge > 0
+                        ? `+${formatRupees(bill.floorCharge)}`
+                        : '₹0 (No extra charge)'}
+                    </span>
+                  </div>
+                </div>
+
                 <div className="pt-2 mt-2 border-t border-slate-200 flex items-center justify-between font-bold text-slate-900">
                   <span>Payable Total</span>
                   <span className="font-display text-lg text-blue-800 tabular-nums">
-                    {formatRupees(subtotal)}
+                    {formatRupees(bill.totalAmount)}
                   </span>
                 </div>
+
+                <p className="pt-1.5 text-[11px] text-blue-900 font-medium leading-relaxed">
+                  {FLOOR_CHARGE_NOTE}
+                </p>
               </div>
 
               <div>
@@ -1455,7 +2189,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   htmlFor="checkout-address"
                   className="block text-sm font-semibold text-slate-800 mb-1"
                 >
-                  House/Flat No. &amp; Tolichowki Landmark
+                  House/Flat No. &amp; Nearby Landmark
                 </label>
                 <textarea
                   id="checkout-address"
@@ -1463,46 +2197,74 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   required
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
-                  placeholder="e.g. Flat 204, Al-Hasnath Colony, Near Reliance Fresh, Tolichowki"
+                  placeholder="e.g. Flat 204, Green View Apartments, Near Main Road"
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm text-slate-900 focus:outline-none focus:border-blue-700"
                 />
                 {formErrors.address && (
                   <p className="text-xs text-red-600 mt-1">{formErrors.address}</p>
                 )}
 
-                {/* Optional GPS Location Capture (never blocks checkout in WebView) */}
+                {/* GPS Location Capture — Required when Delivery Radius Limit is ON */}
                 <div
                   className={`mt-3 rounded-xl border p-3.5 space-y-2.5 ${
-                    hasValidGps
-                      ? 'bg-emerald-50 border-emerald-300'
-                      : 'bg-blue-50/70 border-blue-200'
+                    isOutsideDeliveryRadius
+                      ? 'bg-red-50 border-red-300'
+                      : hasValidGps
+                        ? 'bg-emerald-50 border-emerald-300'
+                        : storeSettings.radiusEnabled
+                          ? 'bg-amber-50 border-amber-300'
+                          : 'bg-blue-50/70 border-blue-200'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p
                         className={`text-xs font-bold flex items-center gap-1.5 ${
-                          hasValidGps ? 'text-emerald-900' : 'text-blue-950'
+                          isOutsideDeliveryRadius
+                            ? 'text-red-900'
+                            : hasValidGps
+                              ? 'text-emerald-900'
+                              : storeSettings.radiusEnabled
+                                ? 'text-amber-950'
+                                : 'text-blue-950'
                         }`}
                       >
                         <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
                         <span>
-                          {hasValidGps
-                            ? 'Current GPS Location Captured'
-                            : 'GPS Location (Optional — Helps Faster Delivery)'}
+                          {isOutsideDeliveryRadius
+                            ? `Outside ${radiusCheck?.maxRadiusKm ?? storeSettings.deliveryRadiusKm} km delivery radius`
+                            : hasValidGps
+                              ? 'Current GPS Location Captured'
+                              : storeSettings.radiusEnabled
+                                ? `GPS Location Required (${storeSettings.deliveryRadiusKm} km Radius Check)`
+                                : 'GPS Location (Optional — Helps Faster Delivery)'}
                         </span>
                       </p>
                       {hasValidGps && customerLocation ? (
-                        <p className="text-xs text-emerald-800 tabular-nums mt-0.5">
+                        <p
+                          className={`text-xs tabular-nums mt-0.5 ${
+                            isOutsideDeliveryRadius
+                              ? 'text-red-800 font-semibold'
+                              : 'text-emerald-800'
+                          }`}
+                        >
                           Coordinates: {customerLocation.lat.toFixed(5)},{' '}
                           {customerLocation.lng.toFixed(5)}
-                          {zoneResult
-                            ? ` · ${zoneResult.formattedDistance} from Tolichowki`
+                          {radiusCheck
+                            ? ` · ${radiusCheck.formattedDistance} from store`
                             : ''}
                         </p>
                       ) : (
-                        <p className="text-xs text-blue-900 mt-0.5">
-                          Share your GPS pin if available, or place your order directly using your written address.
+                        <p
+                          className={`text-xs mt-0.5 ${
+                            storeSettings.radiusEnabled
+                              ? 'text-amber-900 font-medium'
+                              : 'text-blue-900'
+                          }`}
+                        >
+                          {storeSettings.radiusEnabled
+                            ? `Tap "Share Current Location" to verify you are within our ${storeSettings.deliveryRadiusKm} km delivery zone.`
+                            : 'Share your GPS pin if available, or place your order directly using your written address.'}
                         </p>
                       )}
                     </div>
@@ -1512,10 +2274,13 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                     type="button"
                     disabled={locating}
                     onClick={handleVerifyLocation}
+                    data-testid="checkout-share-gps-btn"
                     className={`w-full min-h-[46px] px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-60 ${
                       hasValidGps
                         ? 'bg-white border border-emerald-400 text-emerald-900 hover:bg-emerald-100'
-                        : 'bg-white border border-blue-300 text-blue-800 hover:bg-blue-100'
+                        : storeSettings.radiusEnabled
+                          ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                          : 'bg-white border border-blue-300 text-blue-800 hover:bg-blue-100'
                     }`}
                   >
                     <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -1528,10 +2293,132 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                     </span>
                   </button>
 
-                  {locationError && (
-                    <p role="status" className="text-xs text-amber-800 font-medium">
-                      {locationError} You can still place your order using your address.
+                  {formErrors.location && (
+                    <p
+                      role="alert"
+                      data-testid="gps-required-alert"
+                      className="text-xs text-red-700 font-bold"
+                    >
+                      {formErrors.location}
                     </p>
+                  )}
+
+                  {locationError && (
+                    <p role="status" className="text-xs text-amber-900 font-medium">
+                      {locationError}
+                      {!storeSettings.radiusEnabled
+                        ? ' You can still place your order using your address.'
+                        : ''}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Floor & Lift Policy + Required Selectors */}
+              <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5">
+                <div
+                  data-testid="floor-policy-notice"
+                  className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2.5 text-xs text-blue-950 font-medium leading-relaxed"
+                >
+                  ℹ️ Delivery Policy: Ground/1st Floor (or any floor with Lift) has
+                  NO extra floor charge. Without lift: 2nd Floor (+₹
+                  {storeSettings.floor2Charge}), 3rd+ Floor (+₹
+                  {storeSettings.floor3PlusCharge}).
+                </div>
+
+                <div>
+                  <span className="block text-sm font-semibold text-slate-800 mb-1.5">
+                    Select Floor <span className="text-red-600">*</span>
+                  </span>
+                  <div
+                    role="group"
+                    aria-label="Select Floor"
+                    className="grid grid-cols-1 sm:grid-cols-3 gap-2"
+                  >
+                    {FLOOR_OPTIONS.map((opt) => {
+                      const active = floorLevel === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => {
+                            setFloorLevel(opt.value);
+                            setFormErrors((prev) => {
+                              if (!prev.floorLevel) return prev;
+                              const next = { ...prev };
+                              delete next.floorLevel;
+                              return next;
+                            });
+                          }}
+                          className={`min-h-[44px] px-3 rounded-xl border text-xs font-bold transition-colors cursor-pointer ${
+                            active
+                              ? 'bg-blue-700 border-blue-700 text-white'
+                              : 'bg-white border-slate-300 text-slate-800 hover:bg-blue-50'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {formErrors.floorLevel && (
+                    <p className="text-xs text-red-600 mt-1">{formErrors.floorLevel}</p>
+                  )}
+                </div>
+
+                <div>
+                  <span className="block text-sm font-semibold text-slate-800 mb-1.5">
+                    Lift Available? <span className="text-red-600">*</span>
+                  </span>
+                  <div
+                    role="group"
+                    aria-label="Lift Available"
+                    className="grid grid-cols-2 gap-2"
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={hasLift === true}
+                      onClick={() => {
+                        setHasLift(true);
+                        setFormErrors((prev) => {
+                          if (!prev.hasLift) return prev;
+                          const next = { ...prev };
+                          delete next.hasLift;
+                          return next;
+                        });
+                      }}
+                      className={`min-h-[44px] px-3 rounded-xl border text-xs sm:text-sm font-bold transition-colors cursor-pointer ${
+                        hasLift === true
+                          ? 'bg-emerald-600 border-emerald-600 text-white'
+                          : 'bg-white border-slate-300 text-slate-800 hover:bg-emerald-50'
+                      }`}
+                    >
+                      Lift: Yes
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={hasLift === false}
+                      onClick={() => {
+                        setHasLift(false);
+                        setFormErrors((prev) => {
+                          if (!prev.hasLift) return prev;
+                          const next = { ...prev };
+                          delete next.hasLift;
+                          return next;
+                        });
+                      }}
+                      className={`min-h-[44px] px-3 rounded-xl border text-xs sm:text-sm font-bold transition-colors cursor-pointer ${
+                        hasLift === false
+                          ? 'bg-amber-600 border-amber-600 text-white'
+                          : 'bg-white border-slate-300 text-slate-800 hover:bg-amber-50'
+                      }`}
+                    >
+                      Lift: No
+                    </button>
+                  </div>
+                  {formErrors.hasLift && (
+                    <p className="text-xs text-red-600 mt-1">{formErrors.hasLift}</p>
                   )}
                 </div>
               </div>
@@ -1630,27 +2517,191 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 </div>
               )}
 
-              {/* Payment Mode: Cash on Delivery Only */}
-              <div>
-                <span className="block text-sm font-semibold text-slate-800 mb-1.5">
+              {/* Owner-Controlled Payment Method (COD / UPI / Both / Disabled) */}
+              <div className="space-y-3">
+                <span className="block text-sm font-semibold text-slate-800">
                   Payment Method
                 </span>
-                <div className="rounded-xl bg-emerald-50 border border-emerald-300 px-4 py-3 flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                    <Banknote className="w-5 h-5" aria-hidden="true" />
+
+                {paymentAvailability.checkoutDisabled ? (
+                  <div
+                    role="alert"
+                    data-testid="payment-disabled-banner"
+                    className="rounded-xl bg-red-50 border border-red-300 px-4 py-3 text-xs sm:text-sm font-bold text-red-900 flex items-start gap-2.5"
+                  >
+                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" aria-hidden="true" />
+                    <span>
+                      Ordering is temporarily unavailable because all payment methods
+                      (UPI &amp; COD) are turned OFF by the store.
+                    </span>
                   </div>
-                  <div>
-                    <p className="text-sm font-bold text-emerald-950">
-                      {COD_DISPLAY_LABEL}
-                    </p>
-                    <p className="text-xs text-emerald-800">
-                      Pay {formatRupees(subtotal)} in cash when your water cans arrive.
-                    </p>
-                  </div>
-                </div>
+                ) : (
+                  <>
+                    {paymentAvailability.upiEnabled &&
+                      paymentAvailability.codEnabled && (
+                        <div
+                          role="group"
+                          aria-label="Select Payment Method"
+                          className="grid grid-cols-2 gap-2"
+                        >
+                          <button
+                            type="button"
+                            data-testid="pay-option-cod"
+                            aria-pressed={selectedPaymentMethod === 'Cash on Delivery'}
+                            onClick={() => setSelectedPaymentMethod('Cash on Delivery')}
+                            className={`min-h-[46px] px-3 rounded-xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                              selectedPaymentMethod === 'Cash on Delivery'
+                                ? 'bg-emerald-600 border-emerald-600 text-white'
+                                : 'bg-white border-slate-300 text-slate-800 hover:bg-emerald-50'
+                            }`}
+                          >
+                            <Banknote className="w-4 h-4 shrink-0" aria-hidden="true" />
+                            <span>Cash on Delivery</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            data-testid="pay-option-upi"
+                            aria-pressed={selectedPaymentMethod === 'UPI'}
+                            onClick={() => setSelectedPaymentMethod('UPI')}
+                            className={`min-h-[46px] px-3 rounded-xl border text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                              selectedPaymentMethod === 'UPI'
+                                ? 'bg-blue-700 border-blue-700 text-white'
+                                : 'bg-white border-slate-300 text-slate-800 hover:bg-blue-50'
+                            }`}
+                          >
+                            <QrCode className="w-4 h-4 shrink-0" aria-hidden="true" />
+                            <span>UPI Payment</span>
+                          </button>
+                        </div>
+                      )}
+
+                    {selectedPaymentMethod === 'Cash on Delivery' &&
+                      paymentAvailability.codEnabled && (
+                        <div className="rounded-xl bg-emerald-50 border border-emerald-300 px-4 py-3 flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                            <Banknote className="w-5 h-5" aria-hidden="true" />
+                          </div>
+                          <div>
+                            <p className="text-sm font-bold text-emerald-950">
+                              {COD_DISPLAY_LABEL}
+                            </p>
+                            <p className="text-xs text-emerald-800">
+                              Pay {formatRupees(bill.totalAmount)} in cash when your water cans arrive.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                    {selectedPaymentMethod === 'UPI' &&
+                      paymentAvailability.upiEnabled && (
+                        <div
+                          data-testid="checkout-upi-section"
+                          className="rounded-2xl bg-blue-50/70 border border-blue-200 p-4 space-y-3.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <p className="text-xs font-bold text-blue-900 uppercase tracking-wide">
+                                Pay via UPI ({storeSettings.upiName})
+                              </p>
+                              <p
+                                data-testid="checkout-upi-id"
+                                className="text-sm font-extrabold text-slate-900 font-mono mt-0.5 break-all"
+                              >
+                                {storeSettings.upiId}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              data-testid="copy-upi-id-btn"
+                              onClick={() =>
+                                void copyPlainText(
+                                  storeSettings.upiId,
+                                  'UPI ID copied!',
+                                  showCopyToast
+                                )
+                              }
+                              className="min-h-[38px] px-3 rounded-xl bg-white hover:bg-blue-100 border border-blue-300 text-blue-900 font-bold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+                            >
+                              <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                              <span>Copy UPI ID</span>
+                            </button>
+                          </div>
+
+                          <div className="bg-white rounded-xl border border-blue-200 p-3 text-center space-y-2">
+                            <UpiQrCode upiUri={upiPaymentUri} />
+                            <p className="text-xs font-semibold text-slate-700 tabular-nums">
+                              Scan QR to pay{' '}
+                              <strong className="text-blue-800">
+                                {formatRupees(bill.totalAmount)}
+                              </strong>
+                            </p>
+                            <a
+                              href={upiPaymentUri}
+                              data-testid="open-upi-app-btn"
+                              className="w-full min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm inline-flex items-center justify-center gap-2 transition-colors"
+                            >
+                              <ExternalLink className="w-4 h-4 shrink-0" aria-hidden="true" />
+                              <span>Open UPI App ({formatRupees(bill.totalAmount)})</span>
+                            </a>
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="checkout-upi-utr"
+                              className="block text-xs font-bold text-slate-900 mb-1"
+                            >
+                              Enter 12-Digit UTR Number <span className="text-red-600">*</span>
+                            </label>
+                            <input
+                              id="checkout-upi-utr"
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={12}
+                              required
+                              value={upiUtr}
+                              onChange={(e) => {
+                                setUpiUtr(sanitizeUtrInput(e.target.value));
+                                setFormErrors((prev) => {
+                                  if (!prev.upiUtr) return prev;
+                                  const next = { ...prev };
+                                  delete next.upiUtr;
+                                  return next;
+                                });
+                              }}
+                              placeholder="Enter 12-digit UTR after payment"
+                              className="w-full min-h-[46px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-mono font-bold text-slate-900 tabular-nums focus:outline-none focus:border-blue-700"
+                            />
+                            <p className="text-[11px] text-slate-600 mt-1">
+                              Your order will show <strong>UPI PAYMENT PENDING</strong> until
+                              DailyDrop Owner verifies your UTR.
+                            </p>
+                            {formErrors.upiUtr && (
+                              <p
+                                role="alert"
+                                className="text-xs font-semibold text-red-600 mt-1"
+                              >
+                                {formErrors.upiUtr}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                  </>
+                )}
               </div>
 
-              {formErrors.submit && (
+              {isOutsideDeliveryRadius && radiusCheck && (
+                <div
+                  role="alert"
+                  data-testid="outside-radius-inline-alert"
+                  className="rounded-xl bg-red-50 border border-red-300 px-3.5 py-3 text-xs font-semibold text-red-900 leading-relaxed"
+                >
+                  {radiusCheck.modalMessage}
+                </div>
+              )}
+
+              {formErrors.submit && !isOutsideDeliveryRadius && (
                 <p role="alert" className="text-sm text-red-600 font-medium">
                   {formErrors.submit}
                 </p>
@@ -1659,15 +2710,104 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
               <div className="pb-safe">
                 <button
                   type="submit"
-                  disabled={submittingOrder || !hasRequiredCheckoutFields}
-                  className="w-full min-h-[52px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  data-testid="place-order-submit-btn"
+                  disabled={
+                    !storeSettings.isOpen ||
+                    paymentAvailability.checkoutDisabled ||
+                    submittingOrder ||
+                    !hasRequiredCheckoutFields
+                  }
+                  className={`w-full min-h-[52px] rounded-xl active:scale-[0.99] text-white font-bold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer ${
+                    isOutsideDeliveryRadius
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : isGpsRequiredAndMissing
+                        ? 'bg-amber-600 hover:bg-amber-700'
+                        : 'bg-blue-700 hover:bg-blue-800'
+                  }`}
                 >
-                  {submittingOrder
-                    ? 'Placing Order…'
-                    : `Place Order · ${formatRupees(subtotal)}`}
+                  {!storeSettings.isOpen
+                    ? 'Store Closed — Ordering Paused'
+                    : paymentAvailability.checkoutDisabled
+                      ? 'Checkout Disabled (No Payment Mode Active)'
+                      : isOutsideDeliveryRadius
+                        ? `Outside ${radiusCheck?.maxRadiusKm ?? storeSettings.deliveryRadiusKm} km delivery radius`
+                        : isGpsRequiredAndMissing
+                          ? 'Share GPS Location to Place Order'
+                          : isUpiMissingOrInvalidUtr
+                            ? 'Enter 12-Digit UTR to Place Order'
+                            : submittingOrder
+                              ? 'Placing Order…'
+                              : `Place Order · ${formatRupees(bill.totalAmount)}`}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Outside Delivery Radius Blocking Modal Pop-up */}
+      {outsideRadiusModal && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-[2px] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="outside-radius-modal-title"
+          data-testid="outside-radius-modal"
+        >
+          <div className="w-full max-w-md bg-white rounded-2xl border border-red-200 shadow-2xl overflow-hidden">
+            <div className="bg-red-600 text-white px-5 py-4 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <AlertTriangle className="w-5 h-5 shrink-0" aria-hidden="true" />
+                <h3
+                  id="outside-radius-modal-title"
+                  className="font-display text-lg font-extrabold leading-tight"
+                >
+                  🚫 Outside Delivery Radius
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOutsideRadiusModal(null)}
+                aria-label="Close delivery radius notice"
+                className="min-w-[36px] min-h-[36px] rounded-lg hover:bg-red-700 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <p
+                data-testid="outside-radius-modal-message"
+                className="text-sm font-semibold text-slate-800 leading-relaxed"
+              >
+                {outsideRadiusModal.modalMessage}
+              </p>
+              <div className="rounded-xl bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs text-red-900 flex items-center justify-between gap-2 tabular-nums">
+                <span>Max Delivery Radius: {outsideRadiusModal.maxRadiusKm} km</span>
+                <span className="font-extrabold">
+                  Your Distance: {outsideRadiusModal.formattedDistance}
+                </span>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOutsideRadiusModal(null);
+                    handleVerifyLocation();
+                  }}
+                  className="flex-1 min-h-[46px] px-4 rounded-xl bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 font-bold text-sm flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <LocateFixed className="w-4 h-4" aria-hidden="true" />
+                  <span>Retry GPS</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOutsideRadiusModal(null)}
+                  className="flex-1 min-h-[46px] px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm cursor-pointer"
+                >
+                  Okay, Got It
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1705,6 +2845,13 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           </div>
         </div>
       )}
+
+      <GpsDisclosureModal
+        open={gpsDisclosureOpen}
+        deliveryRadiusKm={storeSettings.deliveryRadiusKm}
+        onAccept={handleAcceptGpsDisclosure}
+        onDecline={() => setGpsDisclosureOpen(false)}
+      />
 
       <CopyToast message={copyToast} />
       <BackExitToast visible={exitPromptVisible} />

@@ -24,9 +24,9 @@ export function LauncherScreen({
     {
       role: 'customer',
       title: 'DailyDrop Water',
-      subtitle: 'Water & Cold Drinks Delivery • Tolichowki, Hyderabad',
+      subtitle: 'Pure Water & Cold Drinks Delivery',
       description:
-        'Order 20L water cans, 1L bottle boxes, and chilled 2L cold drinks across Tolichowki with live map order tracking.',
+        'Order 20L water cans, 1L bottle boxes, and chilled 2L cold drinks near you with live GPS order tracking.',
       cta: 'Order Water & Drinks',
       urlHint: '?app=customer',
       icon: ShoppingBag,
@@ -68,14 +68,14 @@ export function LauncherScreen({
               </h1>
               <p className="text-cyan-100 text-sm sm:text-base font-medium flex items-center gap-1.5 mt-0.5">
                 <MapPin className="w-4 h-4 shrink-0" aria-hidden="true" />
-                Water &amp; Cold Drinks Delivery • Tolichowki, Hyderabad
+                Water &amp; Cold Drinks Delivery · Live GPS Coverage
               </p>
             </div>
           </div>
 
           <p className="max-w-2xl text-blue-100 text-base sm:text-lg leading-relaxed">
             Pure drinking water cans, packaged bottle cases, and chilled cold drinks
-            delivered across Tolichowki in 15–20 minutes — plus bulk supply for every
+            delivered to your doorstep in 15–20 minutes — plus bulk supply for every
             function and event.
           </p>
         </div>
@@ -140,7 +140,7 @@ export function LauncherScreen({
 
       <footer className="border-t border-slate-200 bg-white">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
-          <span>DailyDrop Water · Water &amp; Cold Drinks Delivery • Tolichowki, Hyderabad</span>
+          <span>DailyDrop Water · Water &amp; Cold Drinks Delivery</span>
           <div className="flex items-center gap-4">
             <a
               href="/?app=privacy"

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Copy, Phone, Trash2 } from 'lucide-react';
 import type { CustomerRecord, Order } from '../../types';
-import { dbDelete, sanitizeFirebaseKey } from '../../services/firebaseDb';
+import { ownerDeleteCustomer } from '../../services/firebaseDb';
 import {
   computeSalesMetrics,
   formatRupees,
@@ -32,7 +32,7 @@ export function SalesCustomersTab({
 
   const handleDeleteCustomer = async (customer: CustomerRecord) => {
     try {
-      await dbDelete(`customers/${sanitizeFirebaseKey(customer.mobile)}`);
+      await ownerDeleteCustomer(customer.mobile);
       setConfirmDeleteMobile(null);
       onNotify(`Removed customer ${customer.name} (${customer.mobile}).`);
     } catch (err) {
@@ -66,7 +66,7 @@ export function SalesCustomersTab({
             {metrics.deliveredCount}
           </p>
           <p className="text-xs text-slate-500 mt-1">
-            Completed Tolichowki drops
+            Completed local drops
           </p>
         </div>
 
@@ -88,7 +88,7 @@ export function SalesCustomersTab({
         <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h2 className="font-display text-lg font-bold text-slate-900">
-              Tolichowki Customer Directory ({customers.length})
+              Customer Directory ({customers.length})
             </h2>
             <p className="text-xs text-slate-500">
               Saved automatically from customer orders · 1-tap call

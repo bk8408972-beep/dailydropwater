@@ -3,7 +3,7 @@ import type { GeoPoint } from '../types';
 export const TOLICHOWKI_CENTER = {
   lat: 17.3984,
   lng: 78.4146,
-  label: 'Tolichowki, Hyderabad',
+  label: 'Store Base Location',
 } as const;
 
 export const DELIVERY_RADIUS_KM = 3.0;
@@ -82,8 +82,61 @@ export function checkTolichowkiZone(lat: number, lng: number): ZoneCheckResult {
   };
 }
 
+export interface DeliveryRadiusConfig {
+  radiusEnabled: boolean;
+  deliveryRadiusKm: number;
+  storeLat: number;
+  storeLng: number;
+}
+
+export interface DeliveryRadiusCheck {
+  radiusEnabled: boolean;
+  maxRadiusKm: number;
+  distanceKm: number;
+  withinRadius: boolean;
+  blocked: boolean;
+  formattedDistance: string;
+  modalMessage: string;
+}
+
 /**
- * Estimates scooter delivery ETA in minutes for urban Tolichowki lanes (~15 km/h avg + 1 min handover buffer).
+ * Evaluates a customer's GPS coordinates against the Owner-controlled store base GPS
+ * and delivery radius using the Haversine formula.
+ */
+export function checkDeliveryRadius(
+  customerLat: number,
+  customerLng: number,
+  config: DeliveryRadiusConfig
+): DeliveryRadiusCheck {
+  const rawDistance = calculateHaversineKm(
+    config.storeLat,
+    config.storeLng,
+    customerLat,
+    customerLng
+  );
+  const distanceKm = Math.round(rawDistance * 100) / 100;
+  const maxRadiusKm =
+    Number.isFinite(config.deliveryRadiusKm) && config.deliveryRadiusKm > 0
+      ? config.deliveryRadiusKm
+      : DELIVERY_RADIUS_KM;
+  const withinRadius = rawDistance <= maxRadiusKm;
+  const blocked = Boolean(config.radiusEnabled) && !withinRadius;
+  const formattedDistance = `${distanceKm.toFixed(2)} km`;
+  const modalMessage = `🚫 Outside ${maxRadiusKm} km delivery radius — We currently deliver only within a ${maxRadiusKm} km radius. Your location is ${distanceKm.toFixed(2)} km away, so this order cannot be placed.`;
+
+  return {
+    radiusEnabled: Boolean(config.radiusEnabled),
+    maxRadiusKm,
+    distanceKm,
+    withinRadius,
+    blocked,
+    formattedDistance,
+    modalMessage,
+  };
+}
+
+/**
+ * Estimates scooter delivery ETA in minutes for local delivery lanes (~15 km/h avg + 1 min handover buffer).
  */
 export function estimateEtaMinutes(distanceKm: number): number {
   if (!Number.isFinite(distanceKm) || distanceKm <= 0) return 2;

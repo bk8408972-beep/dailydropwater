@@ -147,7 +147,7 @@ export function LiveOrderMap({
     // Customer Home Pin
     const homeLatLng: [number, number] = [homePoint.lat, homePoint.lng];
     const homePopup = `<strong>${escapeHtml(
-      hasExactCustomerGps ? 'Your Delivery Location' : 'Tolichowki Delivery Zone'
+      hasExactCustomerGps ? 'Your Delivery Location' : 'Store Delivery Zone'
     )}</strong><br/><span>${escapeHtml(customerAddress)}</span>`;
 
     if (!homeMarkerRef.current) {
@@ -355,7 +355,7 @@ export function LiveOrderMap({
           <MapPin className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
           {hasExactCustomerGps
             ? 'Live Blue Scooter pin tracks your rider to your Home GPS pin'
-            : 'Showing Tolichowki center pin (enable GPS at checkout for exact Home pin)'}
+            : 'Showing store delivery zone pin (enable GPS at checkout for exact Home pin)'}
         </span>
       </div>
     </div>

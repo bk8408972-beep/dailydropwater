@@ -4,7 +4,27 @@ export type ProductCategory = 'Water Cans' | 'Water Bottles' | 'Cold Drinks';
 
 export type ServiceMode = 'fast' | 'events';
 
-export type PaymentMethod = 'Cash on Delivery';
+export type PaymentMethod = 'Cash on Delivery' | 'UPI';
+
+export type FloorLevel = 'ground_1st' | 'floor_2' | 'floor_3_plus';
+
+export interface StoreSettings {
+  isOpen: boolean;
+  autoAssign: boolean;
+  platformFee: number;
+  deliveryFee: number;
+  floor2Charge: number;
+  floor3PlusCharge: number;
+  radiusEnabled: boolean;
+  deliveryRadiusKm: number;
+  storeLat: number;
+  storeLng: number;
+  upiEnabled: boolean;
+  codEnabled: boolean;
+  upiId: string;
+  upiName: string;
+  updatedAt?: number;
+}
 
 export type CanonicalOrderStatus =
   | 'pending'
@@ -88,11 +108,22 @@ export interface Order {
   serviceMode: ServiceMode;
   eventDetails?: EventDetails | null;
   paymentMethod: PaymentMethod | string;
+  upiUtr?: string | null;
+  upiVerified?: boolean;
+  upiVerifiedAt?: number | null;
+  floorLevel?: FloorLevel | null;
+  hasLift?: boolean | null;
+  itemsSubtotal?: number;
+  platformFee?: number;
+  deliveryFee?: number;
+  floorCharge?: number;
   items: OrderItem[];
   totalAmount: number;
   status: OrderStatus;
+  autoAssigned?: boolean;
   assignedRiderId?: string | null;
   assignedRiderName?: string | null;
+  assignedRiderPhone?: string | null;
   assignedRiderMobile?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -123,4 +154,39 @@ export interface RiderRecord {
 export interface OwnerAuthConfig {
   password: string;
   updatedAt?: number;
+}
+
+export interface CustomerProfile {
+  name: string;
+  mobile: string;
+  address: string;
+  updatedAt: number;
+}
+
+export interface ArchivedTransactionSummary {
+  orderId: string;
+  createdAt: number;
+  deliveredAt?: number | null;
+  status: string;
+  paymentMethod: string;
+  upiUtr?: string | null;
+  upiVerified?: boolean;
+  totalAmount: number;
+  floorCharge: number;
+  assignedRiderId?: string | null;
+  assignedRiderName?: string | null;
+}
+
+export interface WeeklyArchiveRecord {
+  id: string;
+  archivedAt: number;
+  trigger: 'auto_7_day' | 'owner_manual_weekly' | 'owner_manual_rider';
+  riderIdScope?: string | null;
+  orderCount: number;
+  deliveredCount: number;
+  rejectedCount: number;
+  totalRevenue: number;
+  codRevenue: number;
+  upiRevenue: number;
+  transactions: ArchivedTransactionSummary[];
 }

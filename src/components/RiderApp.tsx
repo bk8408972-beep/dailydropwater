@@ -4,10 +4,12 @@ import {
   Banknote,
   Bell,
   BellOff,
+  Building2,
   Camera,
   CheckCircle2,
   Clock,
   Copy,
+  History,
   LogOut,
   MapPin,
   Music,
@@ -32,7 +34,6 @@ import {
   subscribePath,
 } from '../services/firebaseDb';
 import {
-  COD_DISPLAY_LABEL,
   formatRupees,
   formatTimestamp,
   getStatusLabel,
@@ -48,13 +49,12 @@ import {
 } from '../utils/orderTimer';
 import { formatRelativeTime } from '../utils/geo';
 import {
-  buildMapsDirectionsByAddressUrl,
-  buildMapsDirectionsUrl,
   buildPhoneCallUrl,
   copyPhoneNumber,
   formatDisplayPhone10,
   WATER_PLANT_LOCATION,
 } from '../utils/androidIntents';
+import { formatFloorLiftSummary } from '../utils/storeSettings';
 import { compressDeliveryPhotoFile } from '../utils/imageCompress';
 import {
   getCustomRingtoneInfo,
@@ -71,7 +71,20 @@ import {
 import { BrandLogo } from './BrandLogo';
 import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
+import { InAppMapModal, type MapModalTarget } from './InAppMapModal';
+import { NetworkStatusBanner } from './NetworkStatusBanner';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
+import {
+  buildHydratedRiderFromSession,
+  clearRiderSession,
+  loadRiderSession,
+  saveRiderSession,
+} from '../utils/sessionStorage';
+import { getOrderPaymentBadge, isCodOrder } from '../utils/payment';
+import {
+  computeRiderStats,
+  getRiderCompletedOrders,
+} from '../utils/riderStats';
 
 const RIDER_WORKFLOW_STEPS = [
   { key: 'pending', short: '1. Accept' },
@@ -87,9 +100,18 @@ export function RiderApp() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
 
-  const [sessionRiderId, setSessionRiderId] = useState<string | null>(null);
-  const [rider, setRider] = useState<RiderRecord | null>(null);
+  const initialSavedSession = useMemo(() => loadRiderSession(), []);
+  const [sessionRiderId, setSessionRiderId] = useState<string | null>(
+    () => initialSavedSession?.riderId ?? null
+  );
+  const [rider, setRider] = useState<RiderRecord | null>(() =>
+    initialSavedSession ? buildHydratedRiderFromSession(initialSavedSession) : null
+  );
+  const sessionLoggedInAtRef = useRef<number>(
+    initialSavedSession?.loggedInAt ?? Date.now()
+  );
   const [orders, setOrders] = useState<Order[]>([]);
+  const [riderTab, setRiderTab] = useState<'active' | 'history'>('active');
   const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
   const [uploadingPhotoOrderId, setUploadingPhotoOrderId] = useState<string | null>(
     null
@@ -111,8 +133,9 @@ export function RiderApp() {
     }, 2200);
   };
 
-  // Live Selfie Camera Modal
+  // Live Selfie Camera Modal & In-App Map Modal
   const [selfieModalOpen, setSelfieModalOpen] = useState(false);
+  const [mapModalTarget, setMapModalTarget] = useState<MapModalTarget | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
   const [capturedPreview, setCapturedPreview] = useState<string | null>(null);
@@ -172,14 +195,20 @@ export function RiderApp() {
       (data) => {
         if (!active) return;
         if (!data || data.isActive === false) {
+          clearRiderSession();
+          stopCameraStream();
+          stopOrderAlertLoop();
+          setIsRinging(false);
           setSessionRiderId(null);
           setRider(null);
           setAuthError(
-            'Your Rider account is no longer active. Please contact the DailyDrop owner.'
+            'Your Rider account was deactivated or removed by the DailyDrop owner. You have been signed out automatically.'
           );
           return;
         }
-        setRider({ ...data, id: sessionRiderId });
+        const hydrated: RiderRecord = { ...data, id: sessionRiderId };
+        setRider(hydrated);
+        saveRiderSession(hydrated, undefined, sessionLoggedInAtRef.current);
       }
     );
 
@@ -218,9 +247,14 @@ export function RiderApp() {
   const outForDeliveryIdsRef = useRef<string[]>(outForDeliveryIds);
   outForDeliveryIdsRef.current = outForDeliveryIds;
 
-  const completedDeliveries = useMemo(
-    () => orders.filter((o) => normalizeOrderStatus(o.status) === 'delivered'),
-    [orders]
+  const riderStats = useMemo(
+    () => (sessionRiderId ? computeRiderStats(orders, sessionRiderId) : null),
+    [orders, sessionRiderId]
+  );
+
+  const riderHistoryOrders = useMemo(
+    () => (sessionRiderId ? getRiderCompletedOrders(orders, sessionRiderId) : []),
+    [orders, sessionRiderId]
   );
 
   const awaitingAcceptanceOrders = useMemo(
@@ -267,6 +301,7 @@ export function RiderApp() {
         status: 'unassigned',
         assignedRiderId: null,
         assignedRiderName: null,
+        assignedRiderPhone: null,
         assignedRiderMobile: null,
         assignedAt: null,
         timedOutAt: now,
@@ -489,6 +524,8 @@ export function RiderApp() {
         return;
       }
       setAcknowledgedOrderIds([]);
+      sessionLoggedInAtRef.current = Date.now();
+      saveRiderSession(result.rider, undefined, sessionLoggedInAtRef.current);
       setRider(result.rider);
       setSessionRiderId(result.rider.id);
       setPasswordInput('');
@@ -604,6 +641,16 @@ export function RiderApp() {
         lastSelfie: capturedPreview,
         dutyOnTime,
       });
+      if (rider) {
+        const updatedRider: RiderRecord = {
+          ...rider,
+          isOnline: true,
+          lastSelfie: capturedPreview,
+          dutyOnTime,
+        };
+        setRider(updatedRider);
+        saveRiderSession(updatedRider, undefined, sessionLoggedInAtRef.current);
+      }
       setActionMessage('Duty is now ON with your live selfie proof saved.');
       handleCloseSelfieModal();
     } catch (err) {
@@ -622,6 +669,11 @@ export function RiderApp() {
       await dbPatch(`riders/${sanitizeFirebaseKey(sessionRiderId)}`, {
         isOnline: false,
       });
+      if (rider) {
+        const updatedRider: RiderRecord = { ...rider, isOnline: false };
+        setRider(updatedRider);
+        saveRiderSession(updatedRider, undefined, sessionLoggedInAtRef.current);
+      }
       setActionMessage('You are now OFF Duty.');
     } catch (err) {
       setActionMessage(
@@ -680,11 +732,14 @@ export function RiderApp() {
 
       await dbPatch(`orders/${sanitizeFirebaseKey(order.id)}`, patch);
 
+      const orderIsCod = isCodOrder(order);
       const stepMessages: Record<typeof nextStatus, string> = {
         accepted: `Order ${order.id} accepted! Navigate to the Water Plant for pickup.`,
         reached_pickup: `Marked Reached Pickup Location for ${order.id}. Load items and tap Picked Up.`,
         out_for_delivery: `Order ${order.id} is Out for Delivery! Live GPS tracking started for customer.`,
-        delivered: `Order ${order.id} Delivered! Cash collected (${formatRupees(order.totalAmount)}).`,
+        delivered: orderIsCod
+          ? `Order ${order.id} Delivered! Cash collected (${formatRupees(order.totalAmount)}).`
+          : `Order ${order.id} Delivered! UPI payment order (${formatRupees(order.totalAmount)}).`,
       };
       setActionMessage(stepMessages[nextStatus]);
     } catch (err) {
@@ -718,7 +773,9 @@ export function RiderApp() {
         updatedAt: Date.now(),
       });
       setActionMessage(
-        `Delivery photo saved for ${order.id} (${compressed.sizeKb} KB). You can now collect ${formatRupees(order.totalAmount)} cash and mark as Delivered.`
+        isCodOrder(order)
+          ? `Delivery photo saved for ${order.id} (${compressed.sizeKb} KB). You can now collect ${formatRupees(order.totalAmount)} cash and mark as Delivered.`
+          : `Delivery photo saved for ${order.id} (${compressed.sizeKb} KB). You can now mark this UPI order as Delivered.`
       );
     } catch (err) {
       setPhotoErrorByOrder((prev) => ({
@@ -736,20 +793,25 @@ export function RiderApp() {
   // Prevent accidental app exit on Android hardware/gesture Back button
   const { exitPromptVisible } = useAndroidBackGuard({
     scope: 'rider',
-    hasOpenOverlay: Boolean(selfieModalOpen || ringtoneModalOpen),
+    hasOpenOverlay: Boolean(mapModalTarget || selfieModalOpen || ringtoneModalOpen),
     onCloseOverlay: () => {
-      if (selfieModalOpen) {
+      if (mapModalTarget) {
+        setMapModalTarget(null);
+      } else if (selfieModalOpen) {
         handleCloseSelfieModal();
       } else if (ringtoneModalOpen) {
         setRingtoneModalOpen(false);
       }
     },
+    isOnSubView: riderTab !== 'active',
+    onReturnHome: () => setRiderTab('active'),
   });
 
   // RIDER LOGIN SCREEN
   if (!sessionRiderId || !rider) {
     return (
       <div className="app-scroll-page min-h-screen bg-slate-50 flex flex-col pb-safe">
+        <NetworkStatusBanner />
         <header className="bg-blue-800 text-white px-4 sm:px-6 py-5">
           <div className="max-w-md mx-auto flex items-center gap-3">
             <BrandLogo size="md" />
@@ -758,7 +820,7 @@ export function RiderApp() {
                 DailyDrop Rider
               </h1>
               <p className="text-xs text-cyan-100">
-                Tolichowki Delivery Fleet Portal
+                Delivery Fleet Portal
               </p>
             </div>
           </div>
@@ -840,6 +902,7 @@ export function RiderApp() {
 
   return (
     <div className="app-scroll-page bg-slate-50 pb-safe-page">
+      <NetworkStatusBanner />
       {/* Rider Sticky Top Bar */}
       <header className="sticky top-0 z-30 bg-blue-800 text-white shadow-sm">
         <div className="max-w-5xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-2">
@@ -884,11 +947,18 @@ export function RiderApp() {
             <button
               type="button"
               onClick={() => {
+                const exitingRiderId = sessionRiderId;
                 stopCameraStream();
                 stopOrderAlertLoop();
                 setIsRinging(false);
+                clearRiderSession();
                 setSessionRiderId(null);
                 setRider(null);
+                if (exitingRiderId) {
+                  void dbPatch(`riders/${sanitizeFirebaseKey(exitingRiderId)}`, {
+                    isOnline: false,
+                  }).catch(() => {});
+                }
               }}
               aria-label="Sign out of Rider App"
               className="min-h-[38px] px-2.5 sm:px-3.5 rounded-xl bg-blue-900/70 hover:bg-blue-900 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
@@ -1077,7 +1147,115 @@ export function RiderApp() {
           </div>
         </section>
 
+        {/* Rider Performance & COD Cash Summary */}
+        {riderStats && (
+          <section
+            aria-label="Rider delivery summary"
+            className="grid grid-cols-2 sm:grid-cols-4 gap-3"
+          >
+            <div className="bg-white rounded-2xl border border-slate-200 p-4">
+              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+                Today&apos;s Delivered
+              </p>
+              <p
+                data-testid="rider-stat-today-delivered"
+                className="font-display text-2xl font-extrabold text-blue-800 mt-1 tabular-nums"
+              >
+                {riderStats.todayDeliveredCount}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Orders completed today
+              </p>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 p-4">
+              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+                Total Delivered
+              </p>
+              <p
+                data-testid="rider-stat-total-delivered"
+                className="font-display text-2xl font-extrabold text-slate-900 mt-1 tabular-nums"
+              >
+                {riderStats.totalDeliveredCount}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                All completed deliveries
+              </p>
+            </div>
+
+            <div className="bg-emerald-50/70 rounded-2xl border border-emerald-200 p-4">
+              <p className="text-[11px] font-bold text-emerald-800 uppercase tracking-wide">
+                Total Cash Collected
+              </p>
+              <p
+                data-testid="rider-stat-cod-cash"
+                className="font-display text-2xl font-extrabold text-emerald-900 mt-1 tabular-nums"
+              >
+                {formatRupees(riderStats.totalCodCashCollected)}
+              </p>
+              <p className="text-[11px] text-emerald-700 font-semibold mt-0.5">
+                COD orders only (excl. UPI)
+              </p>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 p-4">
+              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+                Active Assigned
+              </p>
+              <p
+                data-testid="rider-stat-assigned"
+                className="font-display text-2xl font-extrabold text-cyan-800 mt-1 tabular-nums"
+              >
+                {riderStats.activeCount}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                {riderStats.assignedCount} total assigned
+              </p>
+            </div>
+          </section>
+        )}
+
+        {/* Rider Section Tabs: Active Deliveries | My History (Read-Only) */}
+        <div
+          role="tablist"
+          aria-label="Rider order sections"
+          className="grid grid-cols-2 gap-2 bg-white p-1.5 rounded-2xl border border-slate-200"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={riderTab === 'active'}
+            data-testid="rider-active-tab"
+            onClick={() => setRiderTab('active')}
+            className={`min-h-[44px] px-2.5 sm:px-4 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+              riderTab === 'active'
+                ? 'bg-blue-700 text-white shadow-xs'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <Truck className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span>Active ({activeDeliveries.length})</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={riderTab === 'history'}
+            data-testid="rider-history-tab"
+            onClick={() => setRiderTab('history')}
+            className={`min-h-[44px] px-2.5 sm:px-4 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+              riderTab === 'history'
+                ? 'bg-blue-700 text-white shadow-xs'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <History className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span>My History ({riderHistoryOrders.length})</span>
+          </button>
+        </div>
+
         {/* Active Assigned Deliveries */}
+        {riderTab === 'active' ? (
         <section aria-label="Assigned deliveries">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-display text-xl font-bold text-slate-900">
@@ -1093,7 +1271,7 @@ export function RiderApp() {
               </p>
               <p className="text-sm text-slate-500 mt-1">
                 {rider.isOnline
-                  ? 'Stay online — newly assigned Tolichowki orders appear here instantly.'
+                  ? 'Stay online — newly assigned orders appear here instantly.'
                   : 'Switch Duty ON with your selfie so the Owner can assign orders to you.'}
               </p>
             </div>
@@ -1105,14 +1283,9 @@ export function RiderApp() {
                 const uploadingPhoto = uploadingPhotoOrderId === order.id;
                 const hasDeliveryPhoto = isSafeImageDataUrl(order.deliveryPhoto);
                 const customerCoords = resolveOrderCustomerCoords(order);
-                const plantNavUrl = buildMapsDirectionsUrl(
-                  WATER_PLANT_LOCATION.lat,
-                  WATER_PLANT_LOCATION.lng
-                );
-                const customerNavUrl = customerCoords
-                  ? buildMapsDirectionsUrl(customerCoords.lat, customerCoords.lng)
-                  : buildMapsDirectionsByAddressUrl(order.address);
                 const displayCustomerPhone = formatDisplayPhone10(order.customerMobile);
+                const paymentBadge = getOrderPaymentBadge(order);
+                const orderIsCod = isCodOrder(order);
 
                 const awaitingAcceptance = isAwaitingRiderAcceptance(order);
                 const acceptanceTimer = awaitingAcceptance
@@ -1155,8 +1328,14 @@ export function RiderApp() {
                           <div className="font-display text-xl font-extrabold text-slate-900 tabular-nums">
                             {formatRupees(order.totalAmount)}
                           </div>
-                          <span className="text-[11px] font-bold text-emerald-700">
-                            COD Cash
+                          <span
+                            className={`text-[11px] font-bold ${
+                              paymentBadge.kind === 'upi_pending'
+                                ? 'text-amber-700'
+                                : 'text-emerald-700'
+                            }`}
+                          >
+                            {paymentBadge.shortLabel}
                           </span>
                         </div>
                       </div>
@@ -1193,14 +1372,30 @@ export function RiderApp() {
                         })}
                       </div>
 
-                      {/* COD Cash Banner */}
-                      <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 flex items-center justify-between gap-2 text-xs">
-                        <span className="font-bold text-emerald-900 flex items-center gap-1.5">
-                          <Banknote className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />
-                          <span>{COD_DISPLAY_LABEL}</span>
+                      {/* Payment Status Banner (COD vs UPI Pending / Verified) */}
+                      <div
+                        data-testid={`rider-payment-badge-${order.id}`}
+                        className={`mt-3 rounded-xl px-3 py-2 flex items-center justify-between gap-2 text-xs border ${
+                          paymentBadge.kind === 'upi_pending'
+                            ? 'bg-amber-50 border-amber-300 text-amber-950'
+                            : 'bg-emerald-50 border-emerald-200 text-emerald-950'
+                        }`}
+                      >
+                        <span className="font-bold flex items-center gap-1.5 min-w-0">
+                          <Banknote
+                            className={`w-4 h-4 shrink-0 ${
+                              paymentBadge.kind === 'upi_pending'
+                                ? 'text-amber-700'
+                                : 'text-emerald-700'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span className="truncate">{paymentBadge.label}</span>
                         </span>
-                        <span className="font-display font-extrabold text-emerald-900 text-sm tabular-nums shrink-0">
-                          Collect {formatRupees(order.totalAmount)}
+                        <span className="font-display font-extrabold text-sm tabular-nums shrink-0">
+                          {orderIsCod
+                            ? `Collect ${formatRupees(order.totalAmount)}`
+                            : 'UPI (No Cash)'}
                         </span>
                       </div>
 
@@ -1212,10 +1407,41 @@ export function RiderApp() {
                           />
                           <span>{order.address}</span>
                         </div>
-                        <div className="bg-slate-50 rounded-xl p-3 text-sm font-medium text-slate-800">
-                          {order.items
-                            .map((item) => `${item.quantity} × ${item.name}`)
-                            .join(' · ')}
+                        {formatFloorLiftSummary(order) && (
+                          <div
+                            data-testid={`rider-floor-lift-${order.id}`}
+                            className={`rounded-xl px-3 py-2 text-xs font-bold flex items-center gap-2 border ${
+                              (order.floorCharge ?? 0) > 0
+                                ? 'bg-amber-50 border-amber-300 text-amber-950'
+                                : 'bg-blue-50/70 border-blue-200 text-blue-950'
+                            }`}
+                          >
+                            <Building2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                            <span>Floor &amp; Lift: {formatFloorLiftSummary(order)}</span>
+                          </div>
+                        )}
+                        <div className="bg-slate-50 rounded-xl p-3 text-sm font-medium text-slate-800 space-y-1">
+                          <div>
+                            {order.items
+                              .map((item) => `${item.quantity} × ${item.name}`)
+                              .join(' · ')}
+                          </div>
+                          {(typeof order.platformFee === 'number' ||
+                            typeof order.deliveryFee === 'number' ||
+                            typeof order.floorCharge === 'number') && (
+                            <div className="text-[11px] font-semibold text-slate-500 tabular-nums">
+                              Items {formatRupees(order.itemsSubtotal ?? order.totalAmount)}
+                              {(order.platformFee ?? 0) > 0
+                                ? ` · Platform ${formatRupees(order.platformFee!)}`
+                                : ''}
+                              {(order.deliveryFee ?? 0) > 0
+                                ? ` · Delivery ${formatRupees(order.deliveryFee!)}`
+                                : ''}
+                              {(order.floorCharge ?? 0) > 0
+                                ? ` · Floor ${formatRupees(order.floorCharge!)}`
+                                : ''}
+                            </div>
+                          )}
                         </div>
                         {order.eventDetails && (
                           <div className="text-xs text-cyan-800 font-semibold flex items-center gap-1.5">
@@ -1315,15 +1541,22 @@ export function RiderApp() {
                       {/* STEP 2: Navigate to Plant / Pickup Location -> Reached Pickup Location */}
                       {canonicalStatus === 'accepted' && (
                         <div className="space-y-2.5">
-                          <a
-                            href={plantNavUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setMapModalTarget({
+                                title: 'Plant / Pickup Location',
+                                subtitle: `${order.id} · Water Plant Pickup`,
+                                address: WATER_PLANT_LOCATION.label,
+                                lat: WATER_PLANT_LOCATION.lat,
+                                lng: WATER_PLANT_LOCATION.lng,
+                              })
+                            }
+                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
                           >
                             <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
                             <span>Navigate to Plant / Pickup Location</span>
-                          </a>
+                          </button>
 
                           <button
                             type="button"
@@ -1344,15 +1577,22 @@ export function RiderApp() {
                       {/* STEP 3: Order Picked Up / Out for Delivery */}
                       {canonicalStatus === 'reached_pickup' && (
                         <div className="space-y-2.5">
-                          <a
-                            href={plantNavUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="w-full min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors"
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setMapModalTarget({
+                                title: 'Plant / Pickup Location',
+                                subtitle: `${order.id} · Water Plant Pickup`,
+                                address: WATER_PLANT_LOCATION.label,
+                                lat: WATER_PLANT_LOCATION.lat,
+                                lng: WATER_PLANT_LOCATION.lng,
+                              })
+                            }
+                            className="w-full min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
                           >
                             <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
                             <span>Navigate to Plant / Pickup Location</span>
-                          </a>
+                          </button>
 
                           <button
                             type="button"
@@ -1375,24 +1615,40 @@ export function RiderApp() {
                       {/* STEP 4 & STEP 5: Navigate to Customer -> Take Delivery Photo -> Mark as Delivered (Cash Collected) */}
                       {canonicalStatus === 'out_for_delivery' && (
                         <div className="space-y-3">
-                          <a
-                            href={customerNavUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setMapModalTarget({
+                                title: 'Customer Delivery Location',
+                                subtitle: `${order.id} · ${order.customerName}`,
+                                address: order.address,
+                                lat: customerCoords?.lat ?? null,
+                                lng: customerCoords?.lng ?? null,
+                              })
+                            }
+                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
                           >
                             <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
                             <span>Navigate to Customer Location</span>
-                          </a>
+                          </button>
 
                           <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-900 flex items-center gap-2">
                             <PackageCheck className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
                             <span>
-                              Live GPS tracking active for customer · Collect{' '}
-                              <strong className="tabular-nums">
-                                {formatRupees(order.totalAmount)}
-                              </strong>{' '}
-                              cash at doorstep
+                              {orderIsCod ? (
+                                <>
+                                  Live GPS tracking active for customer · Collect{' '}
+                                  <strong className="tabular-nums">
+                                    {formatRupees(order.totalAmount)}
+                                  </strong>{' '}
+                                  cash at doorstep
+                                </>
+                              ) : (
+                                <>
+                                  Live GPS tracking active for customer ·{' '}
+                                  <strong>{paymentBadge.label}</strong> (No cash to collect)
+                                </>
+                              )}
                             </span>
                           </div>
 
@@ -1468,7 +1724,7 @@ export function RiderApp() {
                             )}
                           </div>
 
-                          {/* Step 5: Mark as Delivered (Cash Collected) — strictly disabled until deliveryPhoto exists */}
+                          {/* Step 5: Mark as Delivered — strictly disabled until deliveryPhoto exists */}
                           <button
                             type="button"
                             disabled={busy || !hasDeliveryPhoto}
@@ -1481,7 +1737,9 @@ export function RiderApp() {
                             <span>
                               {busy
                                 ? 'Completing Delivery…'
-                                : `Mark as Delivered (Cash Collected · ${formatRupees(order.totalAmount)})`}
+                                : orderIsCod
+                                  ? `Mark as Delivered (Cash Collected · ${formatRupees(order.totalAmount)})`
+                                  : `Mark as Delivered (UPI Order · ${formatRupees(order.totalAmount)})`}
                             </span>
                           </button>
 
@@ -1500,34 +1758,98 @@ export function RiderApp() {
             </div>
           )}
         </section>
-
-        {/* Completed Deliveries History */}
-        {completedDeliveries.length > 0 && (
-          <section aria-label="Completed deliveries">
-            <h2 className="font-display text-lg font-bold text-slate-900 mb-3">
-              Completed Deliveries ({completedDeliveries.length})
-            </h2>
-            <div className="bg-white rounded-2xl border border-slate-200 divide-y divide-slate-100">
-              {completedDeliveries.slice(0, 10).map((order) => (
-                <div
-                  key={order.id}
-                  className="p-4 flex items-center justify-between gap-3"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm font-bold text-slate-900 truncate">
-                      {order.customerName} · {order.id}
-                    </p>
-                    <p className="text-xs text-slate-500 truncate">
-                      {order.address} · Delivered{' '}
-                      {formatTimestamp(order.deliveredAt || order.updatedAt)}
-                    </p>
-                  </div>
-                  <div className="font-display font-bold text-emerald-700 tabular-nums shrink-0">
-                    {formatRupees(order.totalAmount)}
-                  </div>
-                </div>
-              ))}
+        ) : (
+          /* READ-ONLY MY HISTORY TAB (No delete permissions for Riders) */
+          <section
+            aria-label="My delivery history"
+            data-testid="rider-history-section"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div>
+                <h2 className="font-display text-xl font-bold text-slate-900">
+                  My Delivery History ({riderHistoryOrders.length})
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Read-only completed orders log · Only DailyDrop Owner can manage or clear history.
+                </p>
+              </div>
             </div>
+
+            {riderHistoryOrders.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+                <History className="w-10 h-10 text-slate-400 mx-auto mb-3" aria-hidden="true" />
+                <p className="font-semibold text-slate-900">
+                  No completed deliveries in your history yet
+                </p>
+                <p className="text-sm text-slate-500 mt-1">
+                  Every order you deliver will appear here automatically.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {riderHistoryOrders.map((order) => {
+                  const badge = getOrderPaymentBadge(order);
+                  const floorSummary = formatFloorLiftSummary(order);
+                  return (
+                    <article
+                      key={order.id}
+                      data-testid={`rider-history-order-${order.id}`}
+                      className="bg-white rounded-2xl border border-slate-200 p-4 space-y-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-slate-500 tabular-nums">
+                            {order.id} · Delivered{' '}
+                            {formatTimestamp(order.deliveredAt || order.updatedAt)}
+                          </p>
+                          <h3 className="font-display text-base font-bold text-slate-900 mt-0.5 truncate">
+                            {order.customerName}
+                          </h3>
+                          <p className="text-xs text-slate-600 mt-0.5">
+                            {order.address}
+                          </p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="font-display text-lg font-extrabold text-emerald-700 tabular-nums">
+                            {formatRupees(order.totalAmount)}
+                          </p>
+                          <span className="text-[11px] font-bold text-emerald-700">
+                            {getStatusLabel(order.status)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="bg-slate-50 rounded-xl px-3 py-2 text-xs font-medium text-slate-800">
+                        {order.items
+                          .map((item) => `${item.quantity} × ${item.name}`)
+                          .join(' · ')}
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span
+                          data-testid={`rider-history-payment-badge-${order.id}`}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold border ${
+                            badge.kind === 'upi_pending'
+                              ? 'bg-amber-50 border-amber-200 text-amber-900'
+                              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                          }`}
+                        >
+                          <Banknote className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                          <span>{badge.label}</span>
+                        </span>
+
+                        {floorSummary && (
+                          <span className="text-slate-600 font-semibold flex items-center gap-1">
+                            <Building2 className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
+                            <span>{floorSummary}</span>
+                          </span>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
       </main>
@@ -1724,6 +2046,11 @@ export function RiderApp() {
         </div>
       )}
 
+      <InAppMapModal
+        target={mapModalTarget}
+        onClose={() => setMapModalTarget(null)}
+        onCopied={showCopyToast}
+      />
       <CopyToast message={copyToast} />
       <BackExitToast visible={exitPromptVisible} />
     </div>

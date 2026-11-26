@@ -26,6 +26,7 @@ let activeLoopInterval: number | null = null;
 let activeVibrationInterval: number | null = null;
 let activeLoopMode: 'none' | 'owner' | 'rider' = 'none';
 let globalUnlockInstalled = false;
+let userHasInteracted = false;
 
 export interface CustomRingtoneInfo {
   hasCustom: boolean;
@@ -58,8 +59,23 @@ export function validateAudioFile(file: {
   return null;
 }
 
-export function triggerVibration(pattern: number | number[]): boolean {
+function canUseDeviceVibration(): boolean {
   if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
+    return false;
+  }
+  const userActivation = (
+    navigator as Navigator & {
+      userActivation?: { hasBeenActive?: boolean; isActive?: boolean };
+    }
+  ).userActivation;
+  if (userActivation && typeof userActivation.hasBeenActive === 'boolean') {
+    return userActivation.hasBeenActive || userActivation.isActive === true;
+  }
+  return userHasInteracted;
+}
+
+export function triggerVibration(pattern: number | number[]): boolean {
+  if (!canUseDeviceVibration()) {
     return false;
   }
   try {
@@ -160,6 +176,7 @@ function getAudioContext(): AudioContext | null {
  * Unlocks Web Audio API on mobile Chrome & Android WebViews using a silent buffer pulse.
  */
 export function unlockAudioContext(): void {
+  userHasInteracted = true;
   const ctx = getAudioContext();
   if (!ctx) return;
   try {
@@ -193,6 +210,7 @@ export function installGlobalAudioUnlock(): () => void {
   ];
 
   const handleFirstGesture = () => {
+    userHasInteracted = true;
     unlockAudioContext();
     if (sharedAudioCtx && sharedAudioCtx.state === 'running') {
       cleanup();

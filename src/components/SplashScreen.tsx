@@ -62,7 +62,7 @@ export function SplashScreen({
         </h1>
 
         <p className="mt-2.5 text-sm sm:text-base font-semibold text-cyan-100 leading-snug text-balance">
-          Water &amp; Cold Drinks Delivery • Tolichowki, Hyderabad
+          Pure Water Cans &amp; Cold Drinks Delivery
         </p>
 
         <div className="mt-4 inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-blue-100">

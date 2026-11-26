@@ -200,7 +200,7 @@ export function LiveFleetMap({
         <div>
           <h2 className="font-display text-lg font-bold text-slate-900 flex items-center gap-2">
             <Navigation className="w-5 h-5 text-blue-700" aria-hidden="true" />
-            <span>Live Fleet Map (Tolichowki 3 km)</span>
+            <span>Live Fleet Map (Delivery Zone)</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
             {onlineRiders.length} Duty-ON{' '}
@@ -276,7 +276,7 @@ export function LiveFleetMap({
 
       {onlineRiders.length === 0 && (
         <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 text-xs text-slate-600">
-          Map centered on Tolichowki, Hyderabad. Duty-ON riders appear live as
+          Map centered on your store delivery zone. Duty-ON riders appear live as
           moving Blue Scooter pins as soon as they start Duty ON.
         </div>
       )}

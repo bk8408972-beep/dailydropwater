@@ -2,16 +2,16 @@ import React, { useState } from 'react';
 import { ImagePlus, Plus, Save, Trash2, X } from 'lucide-react';
 import type { Product, ProductCategory } from '../../types';
 import {
-  dbDelete,
-  dbPatch,
-  dbSet,
-  sanitizeFirebaseKey,
+  ownerDeleteProduct,
+  ownerPatchProduct,
+  ownerSaveProduct,
 } from '../../services/firebaseDb';
 import {
   formatRupees,
   resolveProductImage,
   slugifyProductId,
 } from '../../utils/domain';
+import { sanitizeTextInput } from '../../utils/security';
 import { compressProductImageFile } from '../../utils/imageCompress';
 import { ProductImage } from '../ProductImage';
 
@@ -79,7 +79,7 @@ export function StockTab({ products, onNotify }: StockTabProps) {
     setUploadingPhotoId(product.id);
     try {
       const compressed = await compressProductImageFile(file);
-      await dbPatch(`products/${sanitizeFirebaseKey(product.id)}`, {
+      await ownerPatchProduct(product.id, {
         image: compressed.dataUrl,
       });
       onNotify(
@@ -100,7 +100,7 @@ export function StockTab({ products, onNotify }: StockTabProps) {
     e.preventDefault();
     setFormError(null);
 
-    const trimmed = newName.trim();
+    const trimmed = sanitizeTextInput(newName, 100);
     const priceNum = Number(newPrice);
     const stockNum = Number(newStock);
 
@@ -108,11 +108,11 @@ export function StockTab({ products, onNotify }: StockTabProps) {
       setFormError('Enter a product name.');
       return;
     }
-    if (!Number.isFinite(priceNum) || priceNum <= 0) {
+    if (!Number.isFinite(priceNum) || priceNum <= 0 || priceNum > 100000) {
       setFormError('Enter a valid price in ₹.');
       return;
     }
-    if (!Number.isFinite(stockNum) || stockNum < 0) {
+    if (!Number.isFinite(stockNum) || stockNum < 0 || stockNum > 100000) {
       setFormError('Enter a valid stock count.');
       return;
     }
@@ -132,7 +132,7 @@ export function StockTab({ products, onNotify }: StockTabProps) {
           resolveProductImage({ name: trimmed, category: newCategory }),
         createdAt: Date.now(),
       };
-      await dbSet(`products/${sanitizeFirebaseKey(id)}`, item);
+      await ownerSaveProduct(item);
       setNewName('');
       setNewPrice('');
       setNewStock('50');
@@ -183,7 +183,7 @@ export function StockTab({ products, onNotify }: StockTabProps) {
 
     setSavingId(product.id);
     try {
-      await dbPatch(`products/${sanitizeFirebaseKey(product.id)}`, {
+      await ownerPatchProduct(product.id, {
         price: Math.round(priceNum),
         stock: Math.round(stockNum),
         inStock: stockNum > 0 ? product.inStock : false,
@@ -207,7 +207,7 @@ export function StockTab({ products, onNotify }: StockTabProps) {
     setSavingId(product.id);
     try {
       const nextInStock = !product.inStock;
-      await dbPatch(`products/${sanitizeFirebaseKey(product.id)}`, {
+      await ownerPatchProduct(product.id, {
         inStock: nextInStock,
         stock: nextInStock && product.stock === 0 ? 10 : product.stock,
       });
@@ -226,7 +226,7 @@ export function StockTab({ products, onNotify }: StockTabProps) {
   const handleDeleteProduct = async (product: Product) => {
     setSavingId(product.id);
     try {
-      await dbDelete(`products/${sanitizeFirebaseKey(product.id)}`);
+      await ownerDeleteProduct(product.id);
       setConfirmDeleteId(null);
       onNotify(`Deleted "${product.name}".`);
     } catch (err) {

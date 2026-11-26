@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Banknote,
+  Building2,
   Camera,
   Check,
   Clock,
   Copy,
   MapPin,
+  Navigation,
   Phone,
   RefreshCw,
   Trash2,
@@ -15,18 +17,17 @@ import {
 } from 'lucide-react';
 import type { Order, RiderRecord } from '../../types';
 import {
-  dbDelete,
-  dbPatch,
-  sanitizeFirebaseKey,
+  ownerDeleteOrder,
+  ownerPatchOrder,
 } from '../../services/firebaseDb';
 import {
-  COD_DISPLAY_LABEL,
   formatRupees,
   formatTimestamp,
   getStatusLabel,
   isActiveOrderStatus,
   isSafeImageDataUrl,
   normalizeOrderStatus,
+  resolveOrderCustomerCoords,
 } from '../../utils/domain';
 import {
   getRiderAcceptanceCountdown,
@@ -39,6 +40,9 @@ import {
   copyPhoneNumber,
   formatDisplayPhone10,
 } from '../../utils/androidIntents';
+import { formatFloorLiftSummary } from '../../utils/storeSettings';
+import { getOrderPaymentBadge, isUpiOrder } from '../../utils/payment';
+import type { MapModalTarget } from '../InAppMapModal';
 
 const OWNER_STEPS = [
   { key: 'pending', label: 'Placed' },
@@ -53,6 +57,7 @@ interface LiveOrdersTabProps {
   riders: RiderRecord[];
   completedCleanupCount: number;
   onOpenWeeklyCleanup: () => void;
+  onOpenMapModal: (target: MapModalTarget) => void;
   onNotify: (msg: string) => void;
 }
 
@@ -61,6 +66,7 @@ export function LiveOrdersTab({
   riders,
   completedCleanupCount,
   onOpenWeeklyCleanup,
+  onOpenMapModal,
   onNotify,
 }: LiveOrdersTabProps) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -101,16 +107,16 @@ export function LiveOrdersTab({
       ownerTimeoutHandledRef.current.add(key);
 
       const now = Date.now();
-      void dbPatch(`orders/${sanitizeFirebaseKey(order.id)}`, {
+      void ownerPatchOrder(order.id, {
         status: 'unassigned',
         assignedRiderId: null,
         assignedRiderName: null,
+        assignedRiderPhone: null,
         assignedRiderMobile: null,
         assignedAt: null,
         timedOutAt: now,
         lastTimedOutRiderId: order.assignedRiderId ?? null,
         lastTimedOutRiderName: order.assignedRiderName ?? null,
-        updatedAt: now,
       })
         .then(() => {
           onNotify(
@@ -135,10 +141,7 @@ export function LiveOrdersTab({
   ) => {
     setBusyId(orderId);
     try {
-      await dbPatch(`orders/${sanitizeFirebaseKey(orderId)}`, {
-        ...patch,
-        updatedAt: Date.now(),
-      });
+      await ownerPatchOrder(orderId, patch);
       onNotify(message);
     } catch (err) {
       onNotify(
@@ -161,6 +164,7 @@ export function LiveOrdersTab({
           status: 'unassigned',
           assignedRiderId: null,
           assignedRiderName: null,
+          assignedRiderPhone: null,
           assignedRiderMobile: null,
           assignedAt: null,
         },
@@ -190,6 +194,7 @@ export function LiveOrdersTab({
         ownerApproved: true,
         assignedRiderId: chosen.id,
         assignedRiderName: chosen.name,
+        assignedRiderPhone: chosen.mobile,
         assignedRiderMobile: chosen.mobile,
         assignedAt: now,
         timedOutAt: null,
@@ -209,7 +214,7 @@ export function LiveOrdersTab({
   const handleDeleteOrder = async (orderId: string) => {
     setBusyId(orderId);
     try {
-      await dbDelete(`orders/${sanitizeFirebaseKey(orderId)}`);
+      await ownerDeleteOrder(orderId);
       setConfirmDeleteId(null);
       onNotify(`Deleted order ${orderId}.`);
     } catch (err) {
@@ -361,9 +366,20 @@ export function LiveOrdersTab({
                       <div className="font-display text-xl font-extrabold text-slate-900 tabular-nums">
                         {formatRupees(order.totalAmount)}
                       </div>
-                      <div className="text-[11px] font-bold text-emerald-700">
-                        COD Cash
-                      </div>
+                      {(() => {
+                        const badge = getOrderPaymentBadge(order);
+                        return (
+                          <div
+                            className={`text-[11px] font-bold ${
+                              badge.kind === 'upi_pending'
+                                ? 'text-amber-700'
+                                : 'text-emerald-700'
+                            }`}
+                          >
+                            {badge.shortLabel}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -424,10 +440,41 @@ export function LiveOrdersTab({
                         <span>Copy Number</span>
                       </button>
 
-                      <span className="inline-flex items-center gap-1 font-semibold text-emerald-800">
-                        <Banknote className="w-3.5 h-3.5 text-emerald-700" aria-hidden="true" />
-                        <span>{COD_DISPLAY_LABEL}</span>
-                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const coords = resolveOrderCustomerCoords(order);
+                          onOpenMapModal({
+                            title: 'Customer Delivery Location',
+                            subtitle: `${order.id} · ${order.customerName}`,
+                            address: order.address,
+                            lat: coords?.lat ?? null,
+                            lng: coords?.lng ?? null,
+                          });
+                        }}
+                        aria-label={`View map for order ${order.id}`}
+                        className="inline-flex items-center gap-1.5 min-h-[36px] px-2.5 py-1.5 rounded-lg bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 font-bold text-cyan-950 cursor-pointer transition-colors"
+                      >
+                        <Navigation className="w-3.5 h-3.5 text-cyan-700" aria-hidden="true" />
+                        <span>Map</span>
+                      </button>
+
+                      {(() => {
+                        const badge = getOrderPaymentBadge(order);
+                        return (
+                          <span
+                            data-testid={`owner-payment-badge-${order.id}`}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-extrabold text-xs border ${
+                              badge.kind === 'upi_pending'
+                                ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                            }`}
+                          >
+                            <Banknote className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                            <span>{badge.label}</span>
+                          </span>
+                        );
+                      })()}
 
                       {order.gpsStatus === 'address_only' && (
                         <span className="text-[11px] font-semibold text-slate-500">
@@ -436,11 +483,76 @@ export function LiveOrdersTab({
                       )}
                     </div>
 
-                    <div className="bg-slate-50 rounded-xl p-3 text-sm font-medium text-slate-900">
-                      {order.items
-                        .map((i) => `${i.quantity} × ${i.name}`)
-                        .join(' · ')}
+                    {/* Owner-only UPI Payment Verification box */}
+                    {isUpiOrder(order) && !order.upiVerified && (
+                      <div
+                        data-testid={`owner-upi-verify-box-${order.id}`}
+                        className="rounded-xl bg-amber-50 border border-amber-300 p-3 flex flex-wrap items-center justify-between gap-2.5"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs font-extrabold text-amber-950">
+                            UPI PAYMENT PENDING
+                          </p>
+                          <p className="text-xs font-semibold text-amber-900 tabular-nums mt-0.5">
+                            Customer UTR: {order.upiUtr || 'Not provided'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          data-testid={`verify-upi-btn-${order.id}`}
+                          onClick={() =>
+                            updateOrder(
+                              order.id,
+                              { upiVerified: true, upiVerifiedAt: Date.now() },
+                              `UPI payment verified for ${order.id} (UTR ${order.upiUtr || ''}).`
+                            )
+                          }
+                          className="min-h-[40px] px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                        >
+                          <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          <span>Verify UPI Payment</span>
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="bg-slate-50 rounded-xl p-3 text-sm font-medium text-slate-900 space-y-1.5">
+                      <div>
+                        {order.items
+                          .map((i) => `${i.quantity} × ${i.name}`)
+                          .join(' · ')}
+                      </div>
+                      {(typeof order.platformFee === 'number' ||
+                        typeof order.deliveryFee === 'number' ||
+                        typeof order.floorCharge === 'number') && (
+                        <div className="text-[11px] font-semibold text-slate-500 tabular-nums">
+                          Items {formatRupees(order.itemsSubtotal ?? order.totalAmount)}
+                          {(order.platformFee ?? 0) > 0
+                            ? ` · Platform ${formatRupees(order.platformFee!)}`
+                            : ''}
+                          {(order.deliveryFee ?? 0) > 0
+                            ? ` · Delivery ${formatRupees(order.deliveryFee!)}`
+                            : ''}
+                          {(order.floorCharge ?? 0) > 0
+                            ? ` · Floor ${formatRupees(order.floorCharge!)}`
+                            : ''}
+                        </div>
+                      )}
                     </div>
+
+                    {formatFloorLiftSummary(order) && (
+                      <div
+                        data-testid={`owner-floor-lift-${order.id}`}
+                        className={`rounded-xl px-3 py-2 text-xs font-bold flex items-center gap-2 border ${
+                          (order.floorCharge ?? 0) > 0
+                            ? 'bg-amber-50 border-amber-200 text-amber-950'
+                            : 'bg-slate-50 border-slate-200 text-slate-700'
+                        }`}
+                      >
+                        <Building2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span>Floor &amp; Lift: {formatFloorLiftSummary(order)}</span>
+                      </div>
+                    )}
 
                     {order.eventDetails && (
                       <div className="text-xs font-semibold text-cyan-800 flex items-center gap-1.5">

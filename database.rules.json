@@ -1,0 +1,81 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "products": {
+      ".read": true,
+      "$productId": {
+        ".write": "auth != null && auth.token.role === 'owner'",
+        ".validate": "newData.hasChildren(['id', 'name', 'category', 'price', 'stock', 'inStock']) && newData.child('name').isString() && newData.child('name').val().length >= 2 && newData.child('name').val().length <= 120 && newData.child('price').isNumber() && newData.child('price').val() > 0 && newData.child('price').val() <= 100000 && newData.child('stock').isNumber() && newData.child('stock').val() >= 0 && newData.child('stock').val() <= 100000 && newData.child('inStock').isBoolean()"
+      }
+    },
+
+    "storeSettings": {
+      ".read": true,
+      ".write": "auth != null && auth.token.role === 'owner'",
+      ".validate": "newData.child('isOpen').isBoolean() && newData.child('autoAssign').isBoolean() && newData.child('platformFee').isNumber() && newData.child('platformFee').val() >= 0 && newData.child('platformFee').val() <= 500 && newData.child('deliveryFee').isNumber() && newData.child('deliveryFee').val() >= 0 && newData.child('deliveryFee').val() <= 500 && newData.child('floor2Charge').isNumber() && newData.child('floor2Charge').val() >= 0 && newData.child('floor2Charge').val() <= 500 && newData.child('floor3PlusCharge').isNumber() && newData.child('floor3PlusCharge').val() >= 0 && newData.child('floor3PlusCharge').val() <= 500 && newData.child('radiusEnabled').isBoolean() && newData.child('deliveryRadiusKm').isNumber() && newData.child('deliveryRadiusKm').val() > 0 && newData.child('deliveryRadiusKm').val() <= 50 && newData.child('storeLat').isNumber() && newData.child('storeLat').val() >= -90 && newData.child('storeLat').val() <= 90 && newData.child('storeLng').isNumber() && newData.child('storeLng').val() >= -180 && newData.child('storeLng').val() <= 180 && newData.child('upiEnabled').isBoolean() && newData.child('codEnabled').isBoolean() && newData.child('upiId').isString() && newData.child('upiId').val().length <= 80 && newData.child('upiName').isString() && newData.child('upiName').val().length <= 80"
+    },
+
+    "orders": {
+      ".read": "auth != null || query.orderByChild == 'customerMobile'",
+      ".indexOn": ["customerMobile", "assignedRiderId", "status", "createdAt"],
+      "$orderId": {
+        ".read": true,
+        ".write": "(auth != null && auth.token.role === 'owner') || (!data.exists() && newData.exists() && root.child('storeSettings/isOpen').val() === true) || (auth != null && auth.token.role === 'rider' && data.exists() && newData.exists() && data.child('assignedRiderId').val() === auth.token.riderId)",
+        ".validate": "!newData.exists() || (newData.hasChildren(['id', 'customerName', 'customerMobile', 'address', 'items', 'totalAmount', 'status', 'paymentMethod', 'createdAt']) && newData.child('id').val() === $orderId && newData.child('customerName').isString() && newData.child('customerName').val().length >= 2 && newData.child('customerName').val().length <= 80 && newData.child('customerMobile').isString() && newData.child('customerMobile').val().matches(/^[0-9]{10}$/) && newData.child('address').isString() && newData.child('address').val().length >= 8 && newData.child('address').val().length <= 260 && newData.child('totalAmount').isNumber() && newData.child('totalAmount').val() > 0 && newData.child('totalAmount').val() <= 500000 && (!newData.child('itemsSubtotal').exists() || (newData.child('itemsSubtotal').isNumber() && newData.child('itemsSubtotal').val() > 0)) && (!newData.child('platformFee').exists() || (newData.child('platformFee').isNumber() && newData.child('platformFee').val() >= 0)) && (!newData.child('deliveryFee').exists() || (newData.child('deliveryFee').isNumber() && newData.child('deliveryFee').val() >= 0)) && (!newData.child('floorCharge').exists() || (newData.child('floorCharge').isNumber() && newData.child('floorCharge').val() >= 0)) && newData.child('status').isString() && newData.child('status').val().matches(/^(pending|assigned|unassigned|accepted|reached_pickup|out_for_delivery|delivered|rejected)$/) && newData.child('paymentMethod').isString() && (newData.child('paymentMethod').val() === 'Cash on Delivery' || (newData.child('paymentMethod').val() === 'UPI' && newData.child('upiUtr').isString() && newData.child('upiUtr').val().matches(/^[0-9]{12}$/))) && (!newData.child('upiVerified').exists() || newData.child('upiVerified').isBoolean()) && (newData.child('upiVerified').val() !== true || (auth != null && auth.token.role === 'owner')))"
+      }
+    },
+
+    "customers": {
+      ".read": "auth != null && auth.token.role === 'owner'",
+      "$mobile": {
+        ".read": "$mobile.matches(/^[0-9]{10}$/)",
+        ".write": "(auth != null && auth.token.role === 'owner') || $mobile.matches(/^[0-9]{10}$/)",
+        ".validate": "!newData.exists() || (newData.hasChildren(['mobile', 'name', 'lastAddress', 'totalOrders', 'lastOrderAt']) && newData.child('mobile').val() === $mobile && newData.child('name').isString() && newData.child('name').val().length >= 2 && newData.child('name').val().length <= 80 && newData.child('lastAddress').isString() && newData.child('lastAddress').val().length <= 260 && newData.child('totalOrders').isNumber() && newData.child('totalOrders').val() >= 0)"
+      }
+    },
+
+    "riders": {
+      ".read": "auth != null && auth.token.role === 'owner'",
+      "$riderId": {
+        ".read": "auth != null && (auth.token.role === 'owner' || auth.token.riderId === $riderId)",
+        ".write": "auth != null && auth.token.role === 'owner'",
+        ".validate": "!newData.exists() || (newData.hasChildren(['id', 'name', 'mobile', 'isActive', 'isOnline']) && newData.child('id').val() === $riderId && newData.child('name').isString() && newData.child('name').val().length >= 2 && newData.child('name').val().length <= 80 && newData.child('mobile').isString() && newData.child('mobile').val().matches(/^[0-9]{10}$/) && newData.child('isActive').isBoolean() && newData.child('isOnline').isBoolean())",
+        "isOnline": {
+          ".write": "auth != null && (auth.token.role === 'owner' || auth.token.riderId === $riderId)",
+          ".validate": "newData.isBoolean()"
+        },
+        "dutyOnTime": {
+          ".write": "auth != null && (auth.token.role === 'owner' || auth.token.riderId === $riderId)"
+        },
+        "lastSelfie": {
+          ".write": "auth != null && (auth.token.role === 'owner' || auth.token.riderId === $riderId)"
+        },
+        "liveLocation": {
+          ".read": true,
+          ".write": "auth != null && (auth.token.role === 'owner' || auth.token.riderId === $riderId)",
+          ".validate": "!newData.exists() || (newData.child('lat').isNumber() && newData.child('lat').val() >= -90 && newData.child('lat').val() <= 90 && newData.child('lng').isNumber() && newData.child('lng').val() >= -180 && newData.child('lng').val() <= 180)"
+        }
+      }
+    },
+
+    "settings": {
+      "ownerAuth": {
+        ".read": "auth != null && auth.token.role === 'owner'",
+        ".write": "auth != null && auth.token.role === 'owner'",
+        ".validate": "newData.hasChildren(['password', 'updatedAt']) && newData.child('password').isString() && newData.child('password').val().length >= 6 && newData.child('password').val().length <= 128"
+      }
+    },
+
+    "archives": {
+      "weeklySummaries": {
+        ".read": "auth != null && auth.token.role === 'owner'",
+        "$archiveId": {
+          ".write": "auth != null && auth.token.role === 'owner'",
+          ".validate": "newData.hasChildren(['id', 'archivedAt', 'orderCount', 'grossTotal']) && newData.child('orderCount').isNumber() && newData.child('orderCount').val() >= 0 && newData.child('grossTotal').isNumber() && newData.child('grossTotal').val() >= 0"
+        }
+      }
+    }
+  }
+}

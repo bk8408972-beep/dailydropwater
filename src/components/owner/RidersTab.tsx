@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   Camera,
   Copy,
+  History,
   MapPin,
   Phone,
   Plus,
@@ -10,16 +11,20 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { RiderRecord } from '../../types';
+import type { Order, RiderRecord } from '../../types';
 import {
-  dbDelete,
-  dbPatch,
-  dbSet,
-  sanitizeFirebaseKey,
+  clearRiderCompletedHistory,
+  ownerDeleteOrder,
+  ownerDeleteRider,
+  ownerPatchRider,
+  ownerSaveRider,
 } from '../../services/firebaseDb';
+import { sanitizePhone10, sanitizeTextInput } from '../../utils/security';
 import {
+  formatRupees,
   formatTimestamp,
   getNextRiderId,
+  getStatusLabel,
   isSafeImageDataUrl,
 } from '../../utils/domain';
 import { formatRelativeTime, isValidGeoPoint } from '../../utils/geo';
@@ -28,14 +33,18 @@ import {
   copyPhoneNumber,
   formatDisplayPhone10,
 } from '../../utils/androidIntents';
+import { computeRiderStats, getRiderCompletedOrders } from '../../utils/riderStats';
+import { getOrderPaymentBadge } from '../../utils/payment';
+import { formatFloorLiftSummary } from '../../utils/storeSettings';
 import { LiveFleetMap } from './LiveFleetMap';
 
 interface RidersTabProps {
   riders: RiderRecord[];
+  orders: Order[];
   onNotify: (msg: string) => void;
 }
 
-export function RidersTab({ riders, onNotify }: RidersTabProps) {
+export function RidersTab({ riders, orders, onNotify }: RidersTabProps) {
   const [name, setName] = useState('');
   const [mobile, setMobile] = useState('');
   const [password, setPassword] = useState('');
@@ -50,15 +59,59 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
   } | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [focusedRiderId, setFocusedRiderId] = useState<string | null>(null);
+  const [historyRider, setHistoryRider] = useState<RiderRecord | null>(null);
+  const [confirmClearHistoryRider, setConfirmClearHistoryRider] =
+    useState<RiderRecord | null>(null);
+  const [clearingHistory, setClearingHistory] = useState(false);
+  const [confirmDeleteOrderId, setConfirmDeleteOrderId] = useState<string | null>(null);
+  const [deletingOrderId, setDeletingOrderId] = useState<string | null>(null);
 
   const nextId = getNextRiderId(riders);
+
+  const handleConfirmClearRiderHistory = async (rider: RiderRecord) => {
+    setClearingHistory(true);
+    try {
+      const res = await clearRiderCompletedHistory(orders, rider.id);
+      setConfirmClearHistoryRider(null);
+      if (res.deletedOrders === 0) {
+        onNotify(`No completed orders to clear for ${rider.name} (${rider.id}).`);
+      } else {
+        onNotify(
+          `Cleared ${res.deletedOrders} completed ${
+            res.deletedOrders === 1 ? 'order' : 'orders'
+          } for ${rider.name} (${rider.id}). Financial archive saved (${res.archiveId}).`
+        );
+      }
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Failed to clear rider history.'
+      );
+    } finally {
+      setClearingHistory(false);
+    }
+  };
+
+  const handleDeleteIndividualOrder = async (orderId: string) => {
+    setDeletingOrderId(orderId);
+    try {
+      await ownerDeleteOrder(orderId);
+      setConfirmDeleteOrderId(null);
+      onNotify(`Deleted order ${orderId}.`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Failed to delete order.'
+      );
+    } finally {
+      setDeletingOrderId(null);
+    }
+  };
 
   const handleAddRider = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
 
-    const trimmedName = name.trim();
-    const digits = mobile.replace(/\D/g, '');
+    const trimmedName = sanitizeTextInput(name, 80);
+    const digits = sanitizePhone10(mobile);
     const trimmedPassword = password.trim();
 
     if (trimmedName.length < 2) {
@@ -88,7 +141,7 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
         dutyOnTime: null,
         createdAt: Date.now(),
       };
-      await dbSet(`riders/${sanitizeFirebaseKey(id)}`, record);
+      await ownerSaveRider(record);
       setName('');
       setMobile('');
       setPassword('');
@@ -105,7 +158,7 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
   const handleToggleActive = async (rider: RiderRecord) => {
     try {
       const nextActive = !rider.isActive;
-      await dbPatch(`riders/${sanitizeFirebaseKey(rider.id)}`, {
+      await ownerPatchRider(rider.id, {
         isActive: nextActive,
         ...(nextActive ? {} : { isOnline: false }),
       });
@@ -123,7 +176,7 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
 
   const handleDeleteRider = async (rider: RiderRecord) => {
     try {
-      await dbDelete(`riders/${sanitizeFirebaseKey(rider.id)}`);
+      await ownerDeleteRider(rider.id);
       setConfirmDeleteId(null);
       onNotify(`Removed Rider ${rider.name} (${rider.id}).`);
     } catch (err) {
@@ -253,6 +306,8 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {riders.map((rider) => {
               const hasSelfie = isSafeImageDataUrl(rider.lastSelfie);
+              const stats = computeRiderStats(orders, rider.id);
+              const completedCount = getRiderCompletedOrders(orders, rider.id).length;
 
               return (
                 <article
@@ -326,6 +381,63 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
                         </p>
                       )}
                     </div>
+                  </div>
+
+                  {/* Rider-wise Performance & COD Cash Summary */}
+                  <div
+                    data-testid={`owner-rider-stats-${rider.id}`}
+                    className="grid grid-cols-3 gap-2 rounded-xl bg-slate-50 border border-slate-200 p-2.5 text-center"
+                  >
+                    <div>
+                      <p className="text-[10px] font-semibold text-slate-500 uppercase">
+                        Assigned
+                      </p>
+                      <p className="font-display text-base font-extrabold text-slate-900 tabular-nums">
+                        {stats.assignedCount}
+                      </p>
+                    </div>
+                    <div className="border-x border-slate-200">
+                      <p className="text-[10px] font-semibold text-slate-500 uppercase">
+                        Delivered
+                      </p>
+                      <p className="font-display text-base font-extrabold text-emerald-700 tabular-nums">
+                        {stats.totalDeliveredCount}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-semibold text-slate-500 uppercase">
+                        COD Cash
+                      </p>
+                      <p className="font-display text-base font-extrabold text-blue-800 tabular-nums">
+                        {formatRupees(stats.totalCodCashCollected)}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Rider History & Clear History (Owner-only) */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      data-testid={`owner-rider-history-btn-${rider.id}`}
+                      onClick={() => {
+                        setConfirmDeleteOrderId(null);
+                        setHistoryRider(rider);
+                      }}
+                      className="flex-1 min-h-[38px] px-3 rounded-xl bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-900 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <History className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Order History ({stats.assignedCount})</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={completedCount === 0}
+                      data-testid={`owner-clear-rider-history-btn-${rider.id}`}
+                      onClick={() => setConfirmClearHistoryRider(rider)}
+                      className="min-h-[38px] px-3 rounded-xl bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Clear History ({completedCount})</span>
+                    </button>
                   </div>
 
                   <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
@@ -451,6 +563,175 @@ export function RidersTab({ riders, onNotify }: RidersTabProps) {
               alt={`${zoomSelfie.name} live duty selfie`}
               className="w-full aspect-square object-cover"
             />
+          </div>
+        </div>
+      )}
+
+      {/* Owner-only Rider Order History Modal */}
+      {historyRider && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/65 flex items-end sm:items-center justify-center p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Order history for ${historyRider.name}`}
+          data-testid="owner-rider-history-modal"
+        >
+          <div className="w-full sm:max-w-xl bg-white rounded-t-3xl sm:rounded-2xl max-h-[88vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-display text-lg font-bold text-slate-900">
+                  {historyRider.name} ({historyRider.id}) — Order History
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Owner can inspect or delete individual orders with confirmation.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryRider(null)}
+                aria-label="Close rider order history"
+                className="min-w-[40px] min-h-[40px] rounded-xl hover:bg-slate-100 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 overflow-y-auto space-y-3 flex-1">
+              {(() => {
+                const riderOrders = orders
+                  .filter((o) => o.assignedRiderId === historyRider.id)
+                  .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+                if (riderOrders.length === 0) {
+                  return (
+                    <p className="text-sm text-slate-500 text-center py-8">
+                      No orders assigned to {historyRider.name} yet.
+                    </p>
+                  );
+                }
+                return riderOrders.map((ord) => {
+                  const badge = getOrderPaymentBadge(ord);
+                  const floorSummary = formatFloorLiftSummary(ord);
+                  return (
+                    <div
+                      key={ord.id}
+                      className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-xs text-slate-500 font-semibold tabular-nums">
+                            {ord.id} · {formatTimestamp(ord.createdAt)}
+                          </p>
+                          <p className="text-sm font-bold text-slate-900 truncate">
+                            {ord.customerName} · {getStatusLabel(ord.status)}
+                          </p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="font-display text-base font-extrabold text-blue-800 tabular-nums">
+                            {formatRupees(ord.totalAmount)}
+                          </p>
+                          <span
+                            className={`inline-block text-[10px] font-extrabold px-2 py-0.5 rounded ${
+                              badge.kind === 'upi_pending'
+                                ? 'bg-amber-100 text-amber-900'
+                                : 'bg-emerald-100 text-emerald-900'
+                            }`}
+                          >
+                            {badge.label}
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-700">
+                        {ord.items.map((i) => `${i.quantity} × ${i.name}`).join(' · ')}
+                      </p>
+                      {floorSummary && (
+                        <p className="text-[11px] font-semibold text-slate-600">
+                          Floor &amp; Lift: {floorSummary}
+                        </p>
+                      )}
+                      <div className="pt-2 border-t border-slate-200 flex items-center justify-end gap-2">
+                        {confirmDeleteOrderId === ord.id ? (
+                          <>
+                            <span className="text-xs font-semibold text-red-700">
+                              Delete this order?
+                            </span>
+                            <button
+                              type="button"
+                              disabled={deletingOrderId === ord.id}
+                              onClick={() => void handleDeleteIndividualOrder(ord.id)}
+                              className="min-h-[34px] px-3 rounded-lg bg-red-600 text-white text-xs font-bold cursor-pointer"
+                            >
+                              {deletingOrderId === ord.id ? 'Deleting…' : 'Confirm Delete'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteOrderId(null)}
+                              className="min-h-[34px] px-2.5 rounded-lg bg-white border border-slate-300 text-slate-700 text-xs font-semibold cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteOrderId(ord.id)}
+                            className="min-h-[34px] px-2.5 rounded-lg text-red-600 hover:bg-red-50 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>Delete Order</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Owner-only Clear Rider History Confirmation Modal */}
+      {confirmClearHistoryRider && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/65 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm clear rider history"
+          data-testid="owner-clear-rider-history-modal"
+        >
+          <div className="w-full max-w-md bg-white rounded-2xl border border-red-200 p-5 shadow-2xl space-y-4">
+            <h3 className="font-display text-lg font-bold text-slate-900">
+              Clear Completed History for {confirmClearHistoryRider.name}?
+            </h3>
+            <p className="text-sm text-slate-700 leading-relaxed">
+              This will archive financial totals to Firebase backups and permanently clear
+              all <strong>Delivered</strong> and <strong>Rejected</strong> orders for{' '}
+              <strong>
+                {confirmClearHistoryRider.name} ({confirmClearHistoryRider.id})
+              </strong>
+              . Active or pending deliveries will NOT be deleted.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={clearingHistory}
+                onClick={() => setConfirmClearHistoryRider(null)}
+                className="min-h-[42px] px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={clearingHistory}
+                data-testid="confirm-clear-rider-history-btn"
+                onClick={() =>
+                  void handleConfirmClearRiderHistory(confirmClearHistoryRider)
+                }
+                className="min-h-[42px] px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm cursor-pointer disabled:opacity-60"
+              >
+                {clearingHistory ? 'Archiving & Clearing…' : 'Confirm Clear History'}
+              </button>
+            </div>
           </div>
         </div>
       )}

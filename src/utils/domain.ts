@@ -1,6 +1,7 @@
 import type {
   AppRole,
   CanonicalOrderStatus,
+  FloorLevel,
   GeoPoint,
   Order,
   OrderStatus,
@@ -290,6 +291,8 @@ export interface CheckoutValidationInput {
   address: string;
   customerLat?: number | null;
   customerLng?: number | null;
+  floorLevel?: FloorLevel | null;
+  hasLift?: boolean | null;
   serviceMode: ServiceMode;
   eventDate?: string;
   timeSlot?: string;
@@ -317,7 +320,13 @@ export function validateCheckoutInput(
     errors.customerMobile = 'Enter a valid 10-digit mobile number.';
   }
   if (trimmedAddress.length < 8) {
-    errors.address = 'Enter your House/Flat No. and a Tolichowki landmark.';
+    errors.address = 'Enter your House/Flat No. and a nearby landmark.';
+  }
+  if (!input.floorLevel) {
+    errors.floorLevel = 'Please select your floor level.';
+  }
+  if (typeof input.hasLift !== 'boolean') {
+    errors.hasLift = 'Please select whether a lift is available (Yes or No).';
   }
   if (input.serviceMode === 'events') {
     if (!input.eventDate?.trim()) {
@@ -433,9 +442,10 @@ export function sanitizePhoneForTel(phone: string): string {
 }
 
 export function buildGoogleMapsUrl(address: string): string {
-  const query = address.toLowerCase().includes('tolichowki')
-    ? `${address}, Hyderabad`
-    : `${address}, Tolichowki, Hyderabad`;
+  const cleaned = address.trim();
+  const query = cleaned.toLowerCase().includes('hyderabad')
+    ? cleaned
+    : `${cleaned}, Hyderabad`;
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 }
 
@@ -489,6 +499,14 @@ export function detectCustomerOrderChanges(
     const currentStatus = normalizeOrderStatus(order.status);
     if (prev.status !== currentStatus) {
       switch (currentStatus) {
+        case 'assigned':
+          return {
+            orderId: order.id,
+            headline: `Rider Assigned to Order ${order.id}`,
+            detail: order.assignedRiderName
+              ? `${order.assignedRiderName} has been assigned to your delivery.`
+              : 'A DailyDrop rider has been assigned to your order.',
+          };
         case 'accepted':
           return {
             orderId: order.id,
@@ -503,7 +521,7 @@ export function detectCustomerOrderChanges(
             headline: `Rider Reached Water Plant (${order.id})`,
             detail: order.assignedRiderName
               ? `${order.assignedRiderName} is loading your water cans & chilled drinks now.`
-              : 'Your order is being loaded at our Tolichowki water plant.',
+              : 'Your order is being loaded at our water plant.',
           };
         case 'out_for_delivery':
           return {
@@ -517,7 +535,7 @@ export function detectCustomerOrderChanges(
           return {
             orderId: order.id,
             headline: `Order ${order.id} Delivered!`,
-            detail: 'Thank you for ordering with DailyDrop Water Tolichowki. Delivery photo proof saved.',
+            detail: 'Thank you for ordering with DailyDrop Water. Delivery photo proof saved.',
           };
         case 'rejected':
           return {

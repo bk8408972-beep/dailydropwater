@@ -77,13 +77,15 @@ test('calculateCartTotals computes accurate item count and rupee subtotal', () =
   assert.equal(totals.subtotal, 275);
 });
 
-test('validateCheckoutInput rejects missing required fields, enforces 10-digit mobile and events date, and keeps GPS optional', () => {
+test('validateCheckoutInput rejects missing required fields, enforces 10-digit mobile, Floor/Lift, and events date, and keeps GPS optional', () => {
   const invalidFast = validateCheckoutInput({
     customerName: 'A',
     customerMobile: '12345',
     address: 'Flat 1',
     customerLat: null,
     customerLng: null,
+    floorLevel: null,
+    hasLift: null,
     serviceMode: 'fast',
     itemCount: 0,
   });
@@ -91,6 +93,8 @@ test('validateCheckoutInput rejects missing required fields, enforces 10-digit m
   assert.ok(invalidFast.customerName);
   assert.ok(invalidFast.customerMobile);
   assert.ok(invalidFast.address);
+  assert.ok(invalidFast.floorLevel);
+  assert.ok(invalidFast.hasLift);
   assert.equal(invalidFast.location, undefined);
 
   const invalidEvents = validateCheckoutInput({
@@ -99,6 +103,8 @@ test('validateCheckoutInput rejects missing required fields, enforces 10-digit m
     address: 'Flat 302, Paramount Colony, Tolichowki',
     customerLat: null,
     customerLng: null,
+    floorLevel: 'ground_1st',
+    hasLift: true,
     serviceMode: 'events',
     eventDate: '',
     timeSlot: '',
@@ -114,6 +120,8 @@ test('validateCheckoutInput rejects missing required fields, enforces 10-digit m
     address: 'Flat 302, Paramount Colony, Tolichowki',
     customerLat: null,
     customerLng: null,
+    floorLevel: 'floor_2',
+    hasLift: false,
     serviceMode: 'fast',
     itemCount: 2,
   });
@@ -125,6 +133,8 @@ test('validateCheckoutInput rejects missing required fields, enforces 10-digit m
     address: 'Flat 302, Paramount Colony, Tolichowki',
     customerLat: 17.3991,
     customerLng: 78.4152,
+    floorLevel: 'floor_3_plus',
+    hasLift: true,
     serviceMode: 'fast',
     itemCount: 2,
   });
@@ -410,7 +420,7 @@ test('androidIntents produces MIT App Inventor safe tel: and standard https:// M
   );
   assert.equal(
     addrDirUrl,
-    'https://www.google.com/maps/dir/?api=1&destination=Flat%20302%2C%20Paramount%20Colony%2C%20Tolichowki%2C%20Hyderabad'
+    'https://www.google.com/maps/dir/?api=1&destination=Flat%20302%2C%20Paramount%20Colony%2C%20Hyderabad'
   );
   assert.equal(addrDirUrl.includes('intent://'), false);
 
@@ -421,6 +431,49 @@ test('androidIntents produces MIT App Inventor safe tel: and standard https:// M
   );
   assert.equal(trackUrl.includes('intent://'), false);
 });
+
+test('buildGoogleMapEmbedUrl and formatCopyLocationText support both GPS coords and address-only fallback', async () => {
+  const { buildGoogleMapEmbedUrl, formatCopyLocationText } = await import(
+    './androidIntents'
+  );
+
+  assert.equal(
+    buildGoogleMapEmbedUrl({
+      lat: 17.3984,
+      lng: 78.4146,
+      address: 'DailyDrop Water Plant',
+    }),
+    'https://maps.google.com/maps?q=17.398400,78.414600&z=16&output=embed'
+  );
+
+  assert.equal(
+    buildGoogleMapEmbedUrl({
+      lat: null,
+      lng: null,
+      address: 'Flat 404, Green View Apartments',
+    }),
+    'https://maps.google.com/maps?q=Flat%20404%2C%20Green%20View%20Apartments%2C%20Hyderabad&z=16&output=embed'
+  );
+
+  assert.equal(
+    formatCopyLocationText({
+      lat: 17.3984,
+      lng: 78.4146,
+      address: 'DailyDrop Water Plant',
+    }),
+    '17.398400, 78.414600'
+  );
+
+  assert.equal(
+    formatCopyLocationText({
+      lat: null,
+      lng: null,
+      address: 'Flat 404, Green View Apartments',
+    }),
+    'Flat 404, Green View Apartments, Hyderabad'
+  );
+});
+
 
 
 

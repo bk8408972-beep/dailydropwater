@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   calculateHaversineKm,
+  checkDeliveryRadius,
   checkTolichowkiZone,
   DELIVERY_RADIUS_KM,
   estimateEtaMinutes,
@@ -60,4 +61,41 @@ test('formatRelativeTime formats live GPS freshness clearly', () => {
   assert.equal(formatRelativeTime(now - 25_000, now), '25s ago');
   assert.equal(formatRelativeTime(now - 180_000, now), '3m ago');
   assert.equal(formatRelativeTime(null, now), 'No GPS yet');
+});
+
+test('checkDeliveryRadius enforces Owner-configured radius and store GPS and honors radiusEnabled toggle', () => {
+  // Store base GPS (17.3984, 78.4136), 3 km limit ON, customer ~6.3 km away (HITEC City)
+  const blocked = checkDeliveryRadius(17.4435, 78.3772, {
+    radiusEnabled: true,
+    deliveryRadiusKm: 3,
+    storeLat: 17.3984,
+    storeLng: 78.4136,
+  });
+  assert.equal(blocked.withinRadius, false);
+  assert.equal(blocked.blocked, true);
+  assert.ok(blocked.distanceKm > 5);
+  assert.equal(
+    blocked.modalMessage,
+    `🚫 Outside 3 km delivery radius — We currently deliver only within a 3 km radius. Your location is ${blocked.distanceKm.toFixed(2)} km away, so this order cannot be placed.`
+  );
+
+  // Same customer when Owner switches radiusEnabled OFF -> NOT blocked
+  const allowedWhenOff = checkDeliveryRadius(17.4435, 78.3772, {
+    radiusEnabled: false,
+    deliveryRadiusKm: 3,
+    storeLat: 17.3984,
+    storeLng: 78.4136,
+  });
+  assert.equal(allowedWhenOff.withinRadius, false);
+  assert.equal(allowedWhenOff.blocked, false);
+
+  // Same customer when Owner expands radius to 7 km -> withinRadius and NOT blocked
+  const allowedWhenExpanded = checkDeliveryRadius(17.4435, 78.3772, {
+    radiusEnabled: true,
+    deliveryRadiusKm: 7,
+    storeLat: 17.3984,
+    storeLng: 78.4136,
+  });
+  assert.equal(allowedWhenExpanded.withinRadius, true);
+  assert.equal(allowedWhenExpanded.blocked, false);
 });
