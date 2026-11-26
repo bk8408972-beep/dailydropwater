@@ -91,6 +91,30 @@ export function buildMapsDirectionsByAddressUrl(address: string): string {
 }
 
 /**
+ * Builds the strict HTTPS Google Maps turn-by-turn driving directions URL for native
+ * <a target="_blank" rel="noopener noreferrer"> navigation links (no intent://, geo:, or window.open).
+ */
+export function buildGoogleMapsDrivingDirectionsUrl(params: {
+  lat?: number | null;
+  lng?: number | null;
+  address: string;
+}): string {
+  const { lat, lng, address } = params;
+  if (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    Math.abs(lat) <= 90 &&
+    Math.abs(lng) <= 180
+  ) {
+    return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=driving`;
+  }
+  const fullAddress = address.trim();
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(fullAddress)}&travelmode=driving`;
+}
+
+/**
  * Builds a standard HTTPS Google Maps pin URL to view the Rider's live GPS location.
  */
 export function buildTrackRiderMapUrl(lat: number, lng: number): string {

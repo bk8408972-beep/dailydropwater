@@ -30,7 +30,9 @@ import {
   isAwaitingRiderAcceptance,
 } from '../../utils/orderTimer';
 import {
+  buildGoogleMapsDrivingDirectionsUrl,
   buildPhoneCallUrl,
+  copyLocationText,
   copyPhoneNumber,
   formatDisplayPhone10,
   WATER_PLANT_LOCATION,
@@ -97,6 +99,11 @@ export function RiderActiveOrderScreen({
     ? getRiderAcceptanceCountdown(order, nowMs)
     : null;
   const customerCoords = resolveOrderCustomerCoords(order);
+  const customerMapsUrl = buildGoogleMapsDrivingDirectionsUrl({
+    lat: customerCoords?.lat ?? null,
+    lng: customerCoords?.lng ?? null,
+    address: order.address,
+  });
   const displayCustomerPhone = formatDisplayPhone10(order.customerMobile);
   const paymentBadge = getOrderPaymentBadge(order);
   const orderIsCod = isCodOrder(order);
@@ -377,25 +384,56 @@ export function RiderActiveOrderScreen({
             )}
           </div>
 
-          {/* Google Maps Navigation Button (In-App WebView-Safe Map Modal) */}
+          {/* Primary Green Open in Google Maps Link + Secondary Copy Location & Map Preview */}
           <div className="space-y-2">
-            <button
-              type="button"
-              data-testid="locked-order-navigate-btn"
-              onClick={() =>
-                onOpenMapModal({
-                  title: 'Customer Delivery Location',
-                  subtitle: `${order.id} · ${order.customerName}`,
-                  address: order.address,
-                  lat: customerCoords?.lat ?? null,
-                  lng: customerCoords?.lng ?? null,
-                })
-              }
-              className="w-full min-h-[48px] px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-extrabold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            <a
+              href={customerMapsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="locked-order-open-google-maps-link"
+              className="w-full min-h-[52px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-sm transition-all"
             >
-              <Navigation className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>Google Maps Navigation (Customer)</span>
-            </button>
+              <span>🧭 Open in Google Maps</span>
+            </a>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                data-testid="locked-order-copy-location-btn"
+                onClick={() =>
+                  void copyLocationText(
+                    {
+                      lat: customerCoords?.lat ?? null,
+                      lng: customerCoords?.lng ?? null,
+                      address: order.address,
+                    },
+                    onShowCopyToast
+                  )
+                }
+                className="min-h-[44px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-900 font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Copy className="w-4 h-4 text-slate-700 shrink-0" aria-hidden="true" />
+                <span>Copy Location</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="locked-order-navigate-btn"
+                onClick={() =>
+                  onOpenMapModal({
+                    title: 'Customer Delivery Location',
+                    subtitle: `${order.id} · ${order.customerName}`,
+                    address: order.address,
+                    lat: customerCoords?.lat ?? null,
+                    lng: customerCoords?.lng ?? null,
+                  })
+                }
+                className="min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                <span>Map Preview</span>
+              </button>
+            </div>
 
             {(canonicalStatus === 'accepted' || canonicalStatus === 'reached_pickup') && (
               <button
