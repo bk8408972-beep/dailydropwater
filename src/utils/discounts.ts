@@ -157,3 +157,15 @@ export function formatSavingsCelebrationHeadline(totalSavings: number): string {
   const cleanSavings = Math.max(0, Math.round(totalSavings));
   return `Congratulations! Aapko ₹${cleanSavings} Discount Ho Gaya!`;
 }
+
+/**
+ * Formats the green discount badge displayed right next to the main price on product cards
+ * (e.g. "₹20 Discount" or "₹50 Discount") whenever MRP minus Selling Price > ₹0.
+ */
+export function formatDiscountAmountBadge(savingsPerUnit: number): string | null {
+  const clean = Math.round(savingsPerUnit);
+  if (!Number.isFinite(clean) || clean <= 0) {
+    return null;
+  }
+  return `₹${clean} Discount`;
+}

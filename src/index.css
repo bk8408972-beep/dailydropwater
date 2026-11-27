@@ -163,7 +163,7 @@
 }
 
 .dd-rider-train {
-  animation: dd-rider-pull-in 1.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: dd-rider-pull-in 1.9s cubic-bezier(0.22, 1, 0.36, 1) 0ms both;
   will-change: transform;
 }
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   calculateCartSavings,
   calculateOrderSavings,
+  formatDiscountAmountBadge,
   formatSavingsCelebrationHeadline,
   resolveProductPricing,
   validateProductDiscountDraft,
@@ -109,4 +110,11 @@ test('calculateOrderSavings and formatSavingsCelebrationHeadline produce exact c
     formatSavingsCelebrationHeadline(savings),
     'Congratulations! Aapko ₹80 Discount Ho Gaya!'
   );
+});
+
+test('formatDiscountAmountBadge formats exact ₹X Discount badge whenever savings > 0', () => {
+  assert.equal(formatDiscountAmountBadge(20), '₹20 Discount');
+  assert.equal(formatDiscountAmountBadge(50), '₹50 Discount');
+  assert.equal(formatDiscountAmountBadge(0), null);
+  assert.equal(formatDiscountAmountBadge(-5), null);
 });

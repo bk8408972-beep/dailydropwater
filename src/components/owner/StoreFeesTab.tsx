@@ -185,9 +185,9 @@ export function StoreFeesTab({
 
   const paymentAvailability = getAvailablePaymentOptions(settings);
 
-  const handleSavePromoBanner = async () => {
+  const savePromoBannerDraft = async (nextEnabled: boolean) => {
     const validated = validatePromoBannerDraft({
-      promoBannerEnabled: promoEnabledInput,
+      promoBannerEnabled: nextEnabled,
       promoBannerText: promoTextInput,
       promoBannerButtonText: promoButtonTextInput,
       promoBannerActionUrl: promoActionUrlInput,
@@ -214,8 +214,8 @@ export function StoreFeesTab({
       });
       onNotify(
         validated.promoBannerEnabled
-          ? `Running Rider Ad Banner is ON (repeats every ${validated.promoBannerIntervalMinutes} min).`
-          : 'Running Rider Ad Banner saved as OFF (hidden in Customer App).'
+          ? `Running Rider Ad Banner is LIVE in Customer App (repeats every ${validated.promoBannerIntervalMinutes} min).`
+          : 'Running Rider Ad Banner switched OFF (hidden in Customer App).'
       );
     } catch (err) {
       onNotify(
@@ -226,6 +226,20 @@ export function StoreFeesTab({
     } finally {
       setSavingKey(null);
     }
+  };
+
+  const handleSavePromoBanner = async () => {
+    await savePromoBannerDraft(promoEnabledInput);
+  };
+
+  const handleTogglePromoBanner = async () => {
+    const nextEnabled = !promoEnabledInput;
+    if (nextEnabled && !promoTextInput.trim()) {
+      setPromoEnabledInput(true);
+      onNotify('Enter Offer Text below and tap Save Banner to show it in Customer App.');
+      return;
+    }
+    await savePromoBannerDraft(nextEnabled);
   };
 
   const handleSaveSupportContact = async () => {
@@ -865,16 +879,30 @@ export function StoreFeesTab({
               </h2>
               <p className="text-xs text-slate-600 mt-1">
                 Slim ~70px strip at the top of Customer App where an animated scooter
-                rider pulls your offer banner &amp; button every saved interval.
+                rider pulls your offer banner &amp; button immediately on load and repeats
+                every saved interval.
+              </p>
+              <p
+                data-testid="owner-promo-banner-live-status"
+                className={`text-xs font-bold mt-1 ${
+                  settings.promoBannerEnabled && settings.promoBannerText.trim()
+                    ? 'text-emerald-700'
+                    : 'text-slate-500'
+                }`}
+              >
+                {settings.promoBannerEnabled && settings.promoBannerText.trim()
+                  ? `Status: LIVE in Customer App (every ${settings.promoBannerIntervalMinutes} min)`
+                  : 'Status: OFF (Hidden in Customer App)'}
               </p>
             </div>
             <button
               type="button"
               role="switch"
+              disabled={savingKey === 'promoBanner'}
               aria-checked={promoEnabledInput}
               data-testid="owner-promo-banner-toggle"
-              onClick={() => setPromoEnabledInput((prev) => !prev)}
-              className={`min-h-[36px] px-3 rounded-xl text-xs font-extrabold flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors ${
+              onClick={() => void handleTogglePromoBanner()}
+              className={`min-h-[36px] px-3 rounded-xl text-xs font-extrabold flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors disabled:opacity-60 ${
                 promoEnabledInput
                   ? 'bg-blue-700 hover:bg-blue-800 text-white'
                   : 'bg-slate-200 hover:bg-slate-300 text-slate-800'

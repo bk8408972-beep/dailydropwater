@@ -30,30 +30,34 @@ interface PromoBannerProps {
  */
 export function PromoBanner({ settings }: PromoBannerProps) {
   const isVisible = shouldShowPromoBanner(settings);
+  const offerText = (settings.promoBannerText ?? '').trim();
+  const buttonText = sanitizePromoBannerButtonText(
+    settings.promoBannerButtonText,
+    DEFAULT_PROMO_BANNER_BUTTON_TEXT
+  );
   const intervalMinutes = sanitizePromoBannerIntervalMinutes(
     settings.promoBannerIntervalMinutes,
     DEFAULT_PROMO_BANNER_INTERVAL_MINUTES
   );
   const [runCount, setRunCount] = useState(1);
 
+  // Immediately run the scooter-rider pull-in animation RIGHT AWAY whenever the banner
+  // becomes visible on page load (after Firebase loads) or when the Owner updates the offer,
+  // and then repeat every saved interval (default 1 min).
   useEffect(() => {
     if (!isVisible) return;
+    setRunCount((prev) => prev + 1);
     const intervalMs = intervalMinutes * 60_000;
     const timer = window.setInterval(() => {
       setRunCount((prev) => prev + 1);
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [isVisible, intervalMinutes]);
+  }, [isVisible, intervalMinutes, offerText, buttonText]);
 
   if (!isVisible) {
     return null;
   }
 
-  const offerText = settings.promoBannerText.trim();
-  const buttonText = sanitizePromoBannerButtonText(
-    settings.promoBannerButtonText,
-    DEFAULT_PROMO_BANNER_BUTTON_TEXT
-  );
   const actionTarget = resolvePromoActionTarget(
     settings.promoBannerActionUrl,
     settings.promoBannerPhone

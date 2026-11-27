@@ -114,6 +114,7 @@ import {
 } from '../utils/security';
 import {
   calculateOrderSavings,
+  formatDiscountAmountBadge,
   resolveProductPricing,
 } from '../utils/discounts';
 import {
@@ -364,6 +365,15 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         setLoadingProducts(false);
       });
 
+    // Subscribe to storeSettings FIRST so live promo banner & store controls always get priority SSE slot #1
+    const unsubStoreSettings = subscribePath<Partial<StoreSettings>>(
+      'storeSettings',
+      (data) => {
+        if (!mounted) return;
+        setStoreSettings(normalizeStoreSettings(data));
+      }
+    );
+
     const unsubProducts = subscribePath<Record<string, Product>>(
       'products',
       (data) => {
@@ -406,20 +416,12 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       }
     );
 
-    const unsubStoreSettings = subscribePath<Partial<StoreSettings>>(
-      'storeSettings',
-      (data) => {
-        if (!mounted) return;
-        setStoreSettings(normalizeStoreSettings(data));
-      }
-    );
-
     return () => {
       mounted = false;
+      unsubStoreSettings();
       unsubProducts();
       unsubOrders();
       unsubRiders();
-      unsubStoreSettings();
     };
   }, []);
 
@@ -1605,22 +1607,30 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                         </div>
                       </div>
 
-                      <div className="px-4 pb-4 pt-2 border-t border-slate-100 flex items-center justify-between gap-3">
-                        <div className="flex flex-col">
-                          {pricing.isDiscountActive ? (
-                            <div className="flex items-baseline gap-2">
+                      <div className="px-4 pb-4 pt-2 border-t border-slate-100 flex items-center justify-between gap-2.5">
+                        <div className="flex flex-col min-w-0">
+                          {pricing.isDiscountActive && pricing.savingsPerUnit > 0 ? (
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                               <span
                                 data-testid={`product-offer-price-${product.id}`}
-                                className="font-display text-xl font-extrabold text-slate-900 tabular-nums"
+                                className="font-display text-xl font-extrabold text-slate-900 tabular-nums leading-none"
                               >
                                 {formatRupees(pricing.effectivePrice)}
                               </span>
                               <span
                                 data-testid={`product-mrp-price-${product.id}`}
-                                className="text-sm font-semibold text-slate-400 line-through tabular-nums"
+                                className="text-sm font-semibold text-slate-400 line-through tabular-nums leading-none"
                               >
                                 {formatRupees(pricing.originalPrice)}
                               </span>
+                              {formatDiscountAmountBadge(pricing.savingsPerUnit) && (
+                                <span
+                                  data-testid={`product-discount-badge-${product.id}`}
+                                  className="inline-flex items-center px-2 py-0.5 rounded-md bg-emerald-100 border border-emerald-300 text-emerald-800 text-[11px] font-extrabold tabular-nums whitespace-nowrap leading-tight"
+                                >
+                                  {formatDiscountAmountBadge(pricing.savingsPerUnit)}
+                                </span>
+                              )}
                             </div>
                           ) : (
                             <div className="font-display text-xl font-extrabold text-slate-900 tabular-nums">
