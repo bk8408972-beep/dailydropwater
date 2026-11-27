@@ -16,6 +16,38 @@ self.addEventListener('message', (event) => {
   }
 });
 
+const SHELL_CACHE = 'dailydrop-pwa-shell-v1';
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  let url;
+  try {
+    url = new URL(req.url);
+  } catch {
+    return;
+  }
+
+  // Only handle same-origin requests; leave Firebase RTDB & external APIs untouched
+  if (url.origin !== self.location.origin) return;
+
+  event.respondWith(
+    fetch(req)
+      .then((response) => {
+        if (response && response.ok && response.type === 'basic') {
+          const clone = response.clone();
+          caches
+            .open(SHELL_CACHE)
+            .then((cache) => cache.put(req, clone))
+            .catch(() => {});
+        }
+        return response;
+      })
+      .catch(() => caches.match(req).then((cached) => cached || caches.match('/')))
+  );
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 

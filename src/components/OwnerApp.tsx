@@ -80,6 +80,7 @@ import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
 import { InAppMapModal, type MapModalTarget } from './InAppMapModal';
 import { NetworkStatusBanner } from './NetworkStatusBanner';
+import { RoleInstallBanner } from './RoleInstallBanner';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 import { LiveOrdersTab } from './owner/LiveOrdersTab';
 import { RidersTab } from './owner/RidersTab';
@@ -665,6 +666,7 @@ export function OwnerApp() {
   if (!authenticated) {
     return (
       <div className="app-scroll-page min-h-screen bg-slate-50 flex flex-col pb-safe">
+        <RoleInstallBanner role="owner" />
         <header className="bg-slate-900 text-white px-4 sm:px-6 py-5">
           <div className="max-w-md mx-auto flex items-center gap-3">
             <BrandLogo size="md" />
@@ -750,6 +752,7 @@ export function OwnerApp() {
   return (
     <div className="app-scroll-page bg-slate-50 pb-safe-page">
       <NetworkStatusBanner />
+      <RoleInstallBanner role="owner" />
       {/* Owner Header */}
       <header className="sticky top-0 z-30 bg-slate-900 text-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">

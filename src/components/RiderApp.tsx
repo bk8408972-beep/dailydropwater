@@ -88,6 +88,7 @@ import { BackExitToast } from './BackExitToast';
 import { CopyToast } from './CopyToast';
 import { InAppMapModal, type MapModalTarget } from './InAppMapModal';
 import { NetworkStatusBanner } from './NetworkStatusBanner';
+import { RoleInstallBanner } from './RoleInstallBanner';
 import { RiderActiveOrderScreen } from './rider/RiderActiveOrderScreen';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 import {
@@ -1195,6 +1196,7 @@ export function RiderApp() {
     return (
       <div className="app-scroll-page min-h-screen bg-slate-50 flex flex-col pb-safe">
         <NetworkStatusBanner />
+        <RoleInstallBanner role="rider" />
         <header className="bg-blue-800 text-white px-4 sm:px-6 py-5">
           <div className="max-w-md mx-auto flex items-center gap-3">
             <BrandLogo size="md" />
@@ -1331,6 +1333,7 @@ export function RiderApp() {
   return (
     <div className="app-scroll-page bg-slate-50 pb-safe-page">
       <NetworkStatusBanner />
+      <RoleInstallBanner role="rider" />
       {/* Rider Sticky Top Bar */}
       <header className="sticky top-0 z-30 bg-blue-800 text-white shadow-sm">
         <div className="max-w-5xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-2">

@@ -24,10 +24,96 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <link rel="manifest" href="/manifest.json" />
+    <link rel="manifest" href="/manifest.json" data-pwa-role="customer" />
     <link rel="icon" type="image/png" sizes="192x192" href="/icon-192x192.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/icon-512x512.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <script>
+      (function () {
+        // Capture beforeinstallprompt immediately so it is never missed during boot/splash
+        window.__ddDeferredInstallPrompt = null;
+        window.addEventListener('beforeinstallprompt', function (e) {
+          e.preventDefault();
+          window.__ddDeferredInstallPrompt = e;
+          window.dispatchEvent(new Event('dd-install-prompt-ready'));
+        });
+        window.addEventListener('appinstalled', function () {
+          window.__ddDeferredInstallPrompt = null;
+        });
+
+        try {
+          var appParam = (new URLSearchParams(window.location.search).get('app') || '').trim().toLowerCase();
+          if (appParam !== 'owner' && appParam !== 'rider') return;
+
+          var origin = window.location.origin;
+          var isOwner = appParam === 'owner';
+          var roleManifest = isOwner
+            ? {
+                id: origin + '/?app=owner',
+                name: 'DailyDrop Owner',
+                short_name: 'DD Owner',
+                description: 'DailyDrop Owner Store Command Center — Orders, Riders & Fees',
+                start_url: origin + '/?app=owner',
+                scope: origin + '/',
+                display: 'standalone',
+                orientation: 'portrait',
+                background_color: '#0f172a',
+                theme_color: '#0f172a',
+                lang: 'en-IN',
+                icons: [
+                  { src: origin + '/icon-owner-192x192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+                  { src: origin + '/icon-owner-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+                  { src: origin + '/icon-owner-maskable-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+                ]
+              }
+            : {
+                id: origin + '/?app=rider',
+                name: 'DailyDrop Rider',
+                short_name: 'DD Rider',
+                description: 'DailyDrop Rider Delivery Fleet Portal — Live Orders & Navigation',
+                start_url: origin + '/?app=rider',
+                scope: origin + '/',
+                display: 'standalone',
+                orientation: 'portrait',
+                background_color: '#1e40af',
+                theme_color: '#1e40af',
+                lang: 'en-IN',
+                icons: [
+                  { src: origin + '/icon-rider-192x192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+                  { src: origin + '/icon-rider-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+                  { src: origin + '/icon-rider-maskable-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+                ]
+              };
+
+          var blob = new Blob([JSON.stringify(roleManifest)], { type: 'application/manifest+json' });
+          var blobUrl = URL.createObjectURL(blob);
+          var link = document.querySelector('link[rel="manifest"]');
+          if (!link) {
+            link = document.createElement('link');
+            link.rel = 'manifest';
+            document.head.appendChild(link);
+          }
+          link.href = blobUrl;
+          link.dataset.pwaRole = appParam;
+
+          var themeMeta = document.querySelector('meta[name="theme-color"]');
+          if (themeMeta) themeMeta.content = roleManifest.theme_color;
+          var appNameMeta = document.querySelector('meta[name="application-name"]');
+          if (appNameMeta) appNameMeta.content = roleManifest.name;
+          var appleTitleMeta = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+          if (appleTitleMeta) appleTitleMeta.content = roleManifest.short_name;
+
+          var icon192 = document.querySelector('link[rel="icon"][sizes="192x192"]');
+          if (icon192) icon192.href = isOwner ? '/icon-owner-192x192.png' : '/icon-rider-192x192.png';
+          var icon512 = document.querySelector('link[rel="icon"][sizes="512x512"]');
+          if (icon512) icon512.href = isOwner ? '/icon-owner-512x512.png' : '/icon-rider-512x512.png';
+          var appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
+          if (appleIcon) appleIcon.href = isOwner ? '/apple-touch-icon-owner.png' : '/apple-touch-icon-rider.png';
+        } catch (err) {
+          // Keep default manifest fallback if Blob API is unavailable
+        }
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

@@ -1,9 +1,9 @@
 {
-  "id": "/?app=customer",
+  "id": "/",
   "name": "DailyDrop Water",
-  "short_name": "DailyDrop Water",
+  "short_name": "DailyDrop",
   "description": "Fast Water Cans & Cold Drinks Delivery Near You",
-  "start_url": "/?app=customer",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",

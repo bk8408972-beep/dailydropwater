@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { AppRole } from './types';
 import { parseAppRole } from './utils/domain';
+import { applyRolePwaManifest } from './utils/pwaManifest';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { SplashScreen } from './components/SplashScreen';
 import { CustomerApp } from './components/CustomerApp';
@@ -37,6 +38,7 @@ function DailyDropRouter() {
 
   useEffect(() => {
     document.title = getTitleForRole(role);
+    applyRolePwaManifest(role);
   }, [role]);
 
   useEffect(() => {
