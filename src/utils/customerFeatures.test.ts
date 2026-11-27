@@ -4,6 +4,7 @@ import {
   buildRepeatOrderCart,
   checkMinimumOrderAmount,
   findLatestCustomerOrder,
+  partitionCustomerOrders,
   resolvePromoActionTarget,
   sanitizeCongratsPopupSeconds,
   sanitizePromoBannerActionUrl,
@@ -298,3 +299,45 @@ test('Running Rider Ad Banner action URL sanitizer, interval clamping, and targe
     href: '#customer-catalog',
   });
 });
+
+test('partitionCustomerOrders clearly separates multiple simultaneous active orders from past orders', () => {
+  const mk = (id: string, status: Order['status'], createdAt: number): Order => ({
+    id,
+    customerName: 'Azeem',
+    customerMobile: '9848012345',
+    address: 'Flat 204, Tolichowki',
+    serviceMode: 'fast',
+    paymentMethod: 'Cash on Delivery',
+    items: [
+      {
+        productId: 'bisleri_20l',
+        name: 'Bisleri 20L',
+        price: 70,
+        quantity: 2,
+        category: 'Water Cans',
+      },
+    ],
+    totalAmount: 140,
+    status,
+    createdAt,
+    updatedAt: createdAt,
+  });
+
+  const result = partitionCustomerOrders([
+    mk('DD-PAST-1', 'delivered', 1000),
+    mk('DD-ACT-1', 'pending', 2000),
+    mk('DD-ACT-2', 'out_for_delivery', 3000),
+    mk('DD-PAST-2', 'rejected', 1500),
+    mk('DD-ACT-3', 'assigned', 4000),
+  ]);
+
+  assert.deepEqual(
+    result.activeOrders.map((o) => o.id),
+    ['DD-ACT-3', 'DD-ACT-2', 'DD-ACT-1']
+  );
+  assert.deepEqual(
+    result.pastOrders.map((o) => o.id),
+    ['DD-PAST-2', 'DD-PAST-1']
+  );
+});
+

@@ -173,6 +173,42 @@ export function findLatestCustomerOrder(
   return latest;
 }
 
+export interface PartitionedCustomerOrders {
+  activeOrders: Order[];
+  pastOrders: Order[];
+}
+
+const CUSTOMER_PAST_STATUSES = new Set(['delivered', 'rejected']);
+
+/**
+ * Partitions a customer's orders into currently Active Orders (pending, assigned,
+ * unassigned, accepted, reached_pickup, out_for_delivery) and Past Orders
+ * (delivered, rejected), allowing any number of simultaneous active orders.
+ */
+export function partitionCustomerOrders(orders: Order[]): PartitionedCustomerOrders {
+  const activeOrders: Order[] = [];
+  const pastOrders: Order[] = [];
+
+  for (const order of orders) {
+    if (!order) continue;
+    const normalized = (order.status ?? '').trim().toLowerCase();
+    if (CUSTOMER_PAST_STATUSES.has(normalized)) {
+      pastOrders.push(order);
+    } else {
+      activeOrders.push(order);
+    }
+  }
+
+  activeOrders.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  pastOrders.sort(
+    (a, b) =>
+      (b.deliveredAt ?? b.updatedAt ?? b.createdAt ?? 0) -
+      (a.deliveredAt ?? a.updatedAt ?? a.createdAt ?? 0)
+  );
+
+  return { activeOrders, pastOrders };
+}
+
 export interface RepeatOrderCartResult {
   cart: Record<string, number>;
   addedItemCount: number;

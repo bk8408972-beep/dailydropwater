@@ -494,3 +494,54 @@ export function validateOrderWritePayload(order: Order): string | null {
 
   return null;
 }
+
+export interface ProductStockDeduction {
+  productId: string;
+  previousStock: number;
+  deductedQty: number;
+  nextStock: number;
+  nextInStock: boolean;
+}
+
+/**
+ * Computes exact post-order stock deductions for each unique product in an order,
+ * clamping stock to >= 0 and automatically setting inStock=false when stock reaches 0.
+ */
+export function computeStockDeductions(
+  items: OrderItem[],
+  catalog: Array<Pick<Product, 'id' | 'stock' | 'inStock'>>
+): ProductStockDeduction[] {
+  const qtyByProductId = new Map<string, number>();
+  for (const item of items) {
+    if (!item || !item.productId || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+      continue;
+    }
+    qtyByProductId.set(
+      item.productId,
+      (qtyByProductId.get(item.productId) ?? 0) + item.quantity
+    );
+  }
+
+  const productById = new Map(catalog.map((p) => [p.id, p]));
+  const deductions: ProductStockDeduction[] = [];
+
+  for (const [productId, deductedQty] of qtyByProductId.entries()) {
+    const product = productById.get(productId);
+    if (!product) continue;
+    const previousStock =
+      typeof product.stock === 'number' && Number.isFinite(product.stock)
+        ? Math.max(0, Math.round(product.stock))
+        : 0;
+    const nextStock = Math.max(0, previousStock - deductedQty);
+    deductions.push({
+      productId,
+      previousStock,
+      deductedQty,
+      nextStock,
+      nextInStock: nextStock > 0 && product.inStock !== false,
+    });
+  }
+
+  return deductions;
+}
+

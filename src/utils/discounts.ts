@@ -34,23 +34,41 @@ export function resolveProductPricing(
       ? Math.round(product.offerPrice)
       : fallbackPrice;
 
-  const isDiscountActive =
-    product.discountEnabled === true &&
+  const isDiscountExplicitlyOff = product.discountEnabled === false;
+  const isDiscountExplicitlyOn = product.discountEnabled === true;
+
+  const hasExplicitOfferDiscount =
+    isDiscountExplicitlyOn &&
     originalPrice > 0 &&
     offerPrice > 0 &&
     offerPrice < originalPrice;
 
-  const effectivePrice = isDiscountActive
-    ? offerPrice
-    : originalPrice > 0
-      ? originalPrice
-      : fallbackPrice;
+  const hasImplicitMrpDiscount =
+    !isDiscountExplicitlyOff &&
+    !isDiscountExplicitlyOn &&
+    originalPrice > 0 &&
+    fallbackPrice > 0 &&
+    fallbackPrice < originalPrice;
 
-  const savingsPerUnit = isDiscountActive ? originalPrice - offerPrice : 0;
+  const isDiscountActive = hasExplicitOfferDiscount || hasImplicitMrpDiscount;
+
+  const effectivePrice = hasExplicitOfferDiscount
+    ? offerPrice
+    : hasImplicitMrpDiscount
+      ? fallbackPrice
+      : originalPrice > 0
+        ? originalPrice
+        : fallbackPrice;
+
+  const savingsPerUnit = isDiscountActive ? originalPrice - effectivePrice : 0;
 
   return {
     originalPrice: originalPrice > 0 ? originalPrice : effectivePrice,
-    offerPrice: offerPrice > 0 ? offerPrice : effectivePrice,
+    offerPrice: hasImplicitMrpDiscount
+      ? fallbackPrice
+      : offerPrice > 0
+        ? offerPrice
+        : effectivePrice,
     effectivePrice,
     savingsPerUnit,
     isDiscountActive,

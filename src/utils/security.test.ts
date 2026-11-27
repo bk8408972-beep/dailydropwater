@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  computeStockDeductions,
   isSafeExternalUrl,
   isValidUpiIdFormat,
   sanitizeAddressInput,
@@ -235,3 +236,34 @@ test('validateAndBuildCanonicalOrder enforces Owner Minimum Order Amount with ex
     );
   }
 });
+
+test('computeStockDeductions deducts ordered quantities accurately and flips inStock=false at 0', () => {
+  const catalog = [
+    { id: 'bisleri_20l', stock: 10, inStock: true },
+    { id: 'sprite_2l', stock: 3, inStock: true },
+    { id: 'kinley_20l', stock: 50, inStock: true },
+  ];
+  const deductions = computeStockDeductions(
+    [
+      { productId: 'bisleri_20l', name: 'Bisleri 20L', price: 70, quantity: 2, category: 'Water Cans' },
+      { productId: 'sprite_2l', name: 'Sprite 2L', price: 95, quantity: 3, category: 'Cold Drinks' },
+    ],
+    catalog
+  );
+  assert.equal(deductions.length, 2);
+  assert.deepEqual(deductions[0], {
+    productId: 'bisleri_20l',
+    previousStock: 10,
+    deductedQty: 2,
+    nextStock: 8,
+    nextInStock: true,
+  });
+  assert.deepEqual(deductions[1], {
+    productId: 'sprite_2l',
+    previousStock: 3,
+    deductedQty: 3,
+    nextStock: 0,
+    nextInStock: false,
+  });
+});
+

@@ -24,6 +24,7 @@ import {
 import { getRiderCompletedOrders } from '../utils/riderStats';
 import {
   assertOwnerAuthenticated,
+  computeStockDeductions,
   sanitizeAddressInput,
   sanitizePhone10,
   sanitizeTextInput,
@@ -461,7 +462,8 @@ export async function ownerDeleteCustomer(mobile: string): Promise<void> {
 
 export async function placeCustomerOrder(
   order: Order,
-  existingCustomer?: CustomerRecord | null
+  existingCustomer?: CustomerRecord | null,
+  catalogSnapshot?: Product[] | null
 ): Promise<void> {
   const sanitizedOrder: Order = {
     ...order,
@@ -488,10 +490,38 @@ export async function placeCustomerOrder(
     lastOrderAt: sanitizedOrder.createdAt,
   };
 
-  await Promise.all([
+  let catalogForStock = catalogSnapshot ?? null;
+  if (!catalogForStock || catalogForStock.length === 0) {
+    const rawProducts = await dbGet<Record<string, Product>>('products').catch(() => null);
+    if (rawProducts) {
+      catalogForStock = Object.entries(rawProducts).map(([id, prod]) => ({
+        ...prod,
+        id: prod.id || id,
+      }));
+    }
+  }
+
+  const stockDeductions = catalogForStock
+    ? computeStockDeductions(sanitizedOrder.items, catalogForStock)
+    : [];
+
+  const writes: Promise<unknown>[] = [
     dbSet(`orders/${safeOrderId}`, sanitizedOrder),
     dbSet(`customers/${safeMobile}`, customerRecord),
-  ]);
+  ];
+
+  for (const deduction of stockDeductions) {
+    const safeProductId = sanitizeFirebaseKey(deduction.productId);
+    if (!safeProductId) continue;
+    writes.push(
+      dbPatch(`products/${safeProductId}`, {
+        stock: deduction.nextStock,
+        inStock: deduction.nextInStock,
+      })
+    );
+  }
+
+  await Promise.all(writes);
 }
 
 export async function submitBulkBookingRequest(

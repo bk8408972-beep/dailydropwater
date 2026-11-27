@@ -3,12 +3,12 @@ import {
   AlertCircle,
   Banknote,
   Bell,
-  BellOff,
   Building2,
   Camera,
   CheckCircle2,
   Clock,
   Copy,
+  ExternalLink,
   History,
   LogOut,
   Mail,
@@ -24,8 +24,6 @@ import {
   Square,
   Truck,
   Upload,
-  Volume2,
-  VolumeX,
   X,
 } from 'lucide-react';
 import type {
@@ -56,6 +54,7 @@ import {
 } from '../utils/orderTimer';
 import { formatRelativeTime } from '../utils/geo';
 import {
+  buildGoogleMapsDrivingDirectionsUrl,
   buildPhoneCallUrl,
   copyPhoneNumber,
   formatDisplayPhone10,
@@ -72,7 +71,6 @@ import {
   ensureOrderAlertAudioPlaying,
   getCustomRingtoneInfo,
   installGlobalAudioUnlock,
-  playShortTestChime,
   resetCustomRingtone,
   saveCustomRingtoneFile,
   startRiderAlarmLoop,
@@ -87,7 +85,6 @@ import {
   isBackgroundKeepAliveActive,
   registerDailyDropServiceWorker,
   requestBackgroundAlertPermission,
-  selectLockedActiveOrder,
   showHighPriorityOrderNotification,
   startDutyBackgroundKeepAlive,
   stopDutyBackgroundKeepAlive,
@@ -100,7 +97,6 @@ import { CopyToast } from './CopyToast';
 import { InAppMapModal, type MapModalTarget } from './InAppMapModal';
 import { NetworkStatusBanner } from './NetworkStatusBanner';
 import { RoleInstallBanner } from './RoleInstallBanner';
-import { RiderActiveOrderScreen } from './rider/RiderActiveOrderScreen';
 import { useAndroidBackGuard } from '../hooks/useAndroidBackGuard';
 import {
   buildHydratedRiderFromSession,
@@ -110,8 +106,11 @@ import {
 } from '../utils/sessionStorage';
 import { getOrderPaymentBadge, isCodOrder } from '../utils/payment';
 import {
+  MAX_RIDER_ACTIVE_ORDERS,
+  canRiderAcceptAnotherOrder,
   computeRiderStats,
   getRiderCompletedOrders,
+  partitionRiderActiveOrders,
 } from '../utils/riderStats';
 
 const RIDER_WORKFLOW_STEPS = [
@@ -121,55 +120,6 @@ const RIDER_WORKFLOW_STEPS = [
   { key: 'out_for_delivery', short: '4. Photo' },
   { key: 'delivered', short: '5. Cash' },
 ] as const;
-
-const LOCKED_ORDER_CACHE_KEY = 'dailydrop_rider_locked_order_v1';
-
-function loadCachedLockedOrder(riderId: string | null): Order | null {
-  if (!riderId || typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(LOCKED_ORDER_CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { riderId?: string; order?: Order };
-    if (
-      parsed &&
-      parsed.riderId === riderId &&
-      parsed.order &&
-      typeof parsed.order.id === 'string' &&
-      parsed.order.assignedRiderId === riderId &&
-      isActiveOrderStatus(parsed.order.status)
-    ) {
-      return parsed.order;
-    }
-  } catch {
-    // ignore corrupted cache
-  }
-  return null;
-}
-
-function saveCachedLockedOrder(riderId: string, order: Order | null): void {
-  if (typeof window === 'undefined') return;
-  try {
-    if (!order) {
-      window.localStorage.removeItem(LOCKED_ORDER_CACHE_KEY);
-      return;
-    }
-    window.localStorage.setItem(
-      LOCKED_ORDER_CACHE_KEY,
-      JSON.stringify({ riderId, order })
-    );
-  } catch {
-    // ignore storage quota failures
-  }
-}
-
-function clearCachedLockedOrder(): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(LOCKED_ORDER_CACHE_KEY);
-  } catch {
-    // ignore
-  }
-}
 
 export function RiderApp() {
   const [riderIdInput, setRiderIdInput] = useState('');
@@ -190,9 +140,6 @@ export function RiderApp() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [storeSettings, setStoreSettings] = useState<StoreSettings>(
     DEFAULT_STORE_SETTINGS
-  );
-  const [cachedLockedOrder, setCachedLockedOrder] = useState<Order | null>(() =>
-    loadCachedLockedOrder(initialSavedSession?.riderId ?? null)
   );
   const [riderTab, setRiderTab] = useState<'active' | 'history'>('active');
   const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
@@ -247,9 +194,7 @@ export function RiderApp() {
   }, []);
   const lastBroadcastMsRef = useRef<number>(0);
 
-  // Loud delivery assignment alarm & custom ringtone state
-  const [soundEnabled, setSoundEnabled] = useState(true);
-  const [acknowledgedOrderIds, setAcknowledgedOrderIds] = useState<string[]>([]);
+  // Automatic delivery assignment alarm & custom ringtone state (no manual mute toggle)
   const [isRinging, setIsRinging] = useState(false);
   const [ringtoneInfo, setRingtoneInfo] = useState<CustomRingtoneInfo>(() =>
     getCustomRingtoneInfo('rider')
@@ -273,8 +218,6 @@ export function RiderApp() {
   const [activeAlarmOrderIds, setActiveAlarmOrderIds] = useState<string[]>([]);
   const notifiedAssignmentKeysRef = useRef<Set<string>>(new Set());
   const prevDutyOnlineRef = useRef<boolean>(Boolean(initialSavedSession?.isOnline));
-  const soundEnabledRef = useRef(soundEnabled);
-  soundEnabledRef.current = soundEnabled;
   const activeAlarmCountRef = useRef(0);
 
   const stopCameraStream = () => {
@@ -293,7 +236,7 @@ export function RiderApp() {
     const unsubNotifClick = subscribeNotificationClickMessages((payload) => {
       if (payload.role && payload.role !== 'rider') return;
       setRiderTab('active');
-      if (soundEnabledRef.current && activeAlarmCountRef.current > 0) {
+      if (activeAlarmCountRef.current > 0) {
         ensureOrderAlertAudioPlaying('rider');
         setIsRinging(true);
       }
@@ -332,8 +275,6 @@ export function RiderApp() {
           stopDutyBackgroundKeepAlive();
           setKeepAliveActive(false);
           setIsRinging(false);
-          clearCachedLockedOrder();
-          setCachedLockedOrder(null);
           setSessionRiderId(null);
           setRider(null);
           setAuthError(
@@ -378,26 +319,15 @@ export function RiderApp() {
     [orders]
   );
 
-  const liveLockedActiveOrder = useMemo(
-    () => selectLockedActiveOrder(orders, sessionRiderId),
+  const { incomingOrders, acceptedActiveOrders } = useMemo(
+    () => partitionRiderActiveOrders(orders, sessionRiderId),
     [orders, sessionRiderId]
   );
 
-  // Sync cached locked active order so reloading the page never flashes Rider Home while unfinished
-  useEffect(() => {
-    if (!sessionRiderId) {
-      clearCachedLockedOrder();
-      setCachedLockedOrder(null);
-      return;
-    }
-    if (!ordersLoaded) return;
-    saveCachedLockedOrder(sessionRiderId, liveLockedActiveOrder);
-    setCachedLockedOrder(liveLockedActiveOrder);
-  }, [sessionRiderId, ordersLoaded, liveLockedActiveOrder]);
-
-  const lockedActiveOrder = ordersLoaded
-    ? liveLockedActiveOrder
-    : cachedLockedOrder;
+  const acceptCapacity = useMemo(
+    () => canRiderAcceptAnotherOrder(orders, sessionRiderId, MAX_RIDER_ACTIVE_ORDERS),
+    [orders, sessionRiderId]
+  );
 
   const outForDeliveryIds = useMemo(
     () =>
@@ -419,30 +349,14 @@ export function RiderApp() {
     [orders, sessionRiderId]
   );
 
-  const awaitingAcceptanceOrders = useMemo(
-    () =>
-      orders.filter(
-        (o) =>
-          o.assignedRiderId === sessionRiderId &&
-          isAwaitingRiderAcceptance(o)
-      ),
-    [orders, sessionRiderId]
-  );
-
-  const unacknowledgedAssignedOrders = useMemo(
-    () =>
-      awaitingAcceptanceOrders.filter(
-        (o) => !acknowledgedOrderIds.includes(o.id)
-      ),
-    [awaitingAcceptanceOrders, acknowledgedOrderIds]
-  );
+  const awaitingAcceptanceOrders = incomingOrders;
 
   const ringingAssignedOrders = useMemo(
     () =>
-      unacknowledgedAssignedOrders.filter((o) =>
+      awaitingAcceptanceOrders.filter((o) =>
         activeAlarmOrderIds.includes(o.id)
       ),
-    [unacknowledgedAssignedOrders, activeAlarmOrderIds]
+    [awaitingAcceptanceOrders, activeAlarmOrderIds]
   );
   activeAlarmCountRef.current = ringingAssignedOrders.length;
 
@@ -658,7 +572,6 @@ export function RiderApp() {
       if (
         document.visibilityState === 'visible' &&
         isDutyOnline &&
-        soundEnabledRef.current &&
         activeAlarmCountRef.current > 0
       ) {
         ensureOrderAlertAudioPlaying('rider');
@@ -675,7 +588,8 @@ export function RiderApp() {
   }, [sessionRiderId, isDutyOnline]);
 
   // 100% SILENT on Duty ON & while waiting for orders.
-  // Trigger loud siren (gain=1.0), heavy vibration, and top notification banner ONLY when a new order arrives.
+  // Trigger loud siren (gain=1.0), heavy vibration, and top notification banner automatically
+  // ONLY when a new order arrives or is assigned (until accepted or rejected).
   useEffect(() => {
     if (!sessionRiderId) {
       stopOrderAlertLoop();
@@ -719,54 +633,30 @@ export function RiderApp() {
     });
 
     if (newlyArrived.length > 0 && isDutyOnline) {
-      const freshIds = new Set(newlyArrived.map((o) => o.id));
-      setAcknowledgedOrderIds((prev) =>
-        prev.some((id) => freshIds.has(id))
-          ? prev.filter((id) => !freshIds.has(id))
-          : prev
-      );
+      setRiderTab('active');
       for (const order of newlyArrived) {
         void showHighPriorityOrderNotification(order, 'rider');
       }
-      if (soundEnabledRef.current) {
-        ensureOrderAlertAudioPlaying('rider');
-        setIsRinging(true);
-      }
+      ensureOrderAlertAudioPlaying('rider');
+      setIsRinging(true);
     }
   }, [sessionRiderId, isDutyOnline, ordersLoaded, awaitingAcceptanceOrders]);
 
-  // Keep siren loop strictly synced with newly arrived, unacknowledged ringing orders while Duty ON
+  // Automatically play siren loop ONLY while newly assigned orders await acceptance during Duty ON
   useEffect(() => {
-    if (sessionRiderId && isDutyOnline && soundEnabled && ringingAssignedOrders.length > 0) {
+    if (sessionRiderId && isDutyOnline && ringingAssignedOrders.length > 0) {
       startRiderAlarmLoop();
       setIsRinging(true);
     } else {
       stopOrderAlertLoop();
       setIsRinging(false);
     }
-  }, [sessionRiderId, isDutyOnline, soundEnabled, ringingAssignedOrders.length]);
-
-  const handleAcknowledgeOrders = (orderIds: string[]) => {
-    if (orderIds.length === 0) return;
-    stopOrderAlertLoop();
-    setIsRinging(false);
-    setActiveAlarmOrderIds((prev) => prev.filter((id) => !orderIds.includes(id)));
-    setAcknowledgedOrderIds((prev) => {
-      const merged = new Set([...prev, ...orderIds]);
-      return Array.from(merged);
-    });
-    setActionMessage(
-      orderIds.length === 1
-        ? `Alert muted for order ${orderIds[0]}. Tap Step 1: Accept Order before the 3-minute timer expires.`
-        : `Alert muted for ${orderIds.length} assigned orders.`
-    );
-  };
+  }, [sessionRiderId, isDutyOnline, ringingAssignedOrders.length]);
 
   const handleEnableBackgroundAlerts = async () => {
     setRingtoneError(null);
     // Unlock audio & enable silent keep-alive with ZERO audible sound/beep
     unlockAudioContext();
-    setSoundEnabled(true);
 
     const perm = await requestBackgroundAlertPermission();
     setNotificationPermission(perm);
@@ -793,33 +683,6 @@ export function RiderApp() {
       setActionMessage(
         'Silent alert listener ready. Allow browser notifications when prompted for pinned alerts over other apps.'
       );
-    }
-  };
-
-  const handleAlertSoundOnButton = () => {
-    setRingtoneError(null);
-    unlockAudioContext();
-    setSoundEnabled(true);
-    playShortTestChime('rider');
-    if (isDutyOnline && !keepAliveActive) {
-      void startDutyBackgroundKeepAlive('rider').then((res) => {
-        setKeepAliveActive(res.active);
-        setKeepAliveNeedsTap(res.blockedByAutoplay);
-      });
-    }
-    setActionMessage(
-      'Order Alert Sound is ON — audio unlocked for incoming delivery alerts.'
-    );
-  };
-
-  const handleMuteAlertButton = () => {
-    if (unacknowledgedAssignedOrders.length > 0) {
-      handleAcknowledgeOrders(unacknowledgedAssignedOrders.map((o) => o.id));
-    } else {
-      stopOrderAlertLoop();
-      setIsRinging(false);
-      setSoundEnabled(false);
-      setActionMessage('Order alert sound muted. Tap "Order Alert Sound: ON" to re-enable.');
     }
   };
 
@@ -871,7 +734,6 @@ export function RiderApp() {
         setAuthError(result.error);
         return;
       }
-      setAcknowledgedOrderIds([]);
       sessionLoggedInAtRef.current = Date.now();
       saveRiderSession(result.rider, undefined, sessionLoggedInAtRef.current);
       setRider(result.rider);
@@ -1066,14 +928,30 @@ export function RiderApp() {
       'accepted' | 'reached_pickup' | 'out_for_delivery' | 'delivered'
     >
   ) => {
+    if (nextStatus === 'accepted') {
+      const cap = canRiderAcceptAnotherOrder(
+        orders,
+        sessionRiderId,
+        MAX_RIDER_ACTIVE_ORDERS
+      );
+      if (!cap.allowed) {
+        setActionMessage(
+          `Maximum ${MAX_RIDER_ACTIVE_ORDERS} active orders reached. Mark an active delivery as Delivered before accepting another order.`
+        );
+        return;
+      }
+    }
+
     setUpdatingOrderId(order.id);
     if (nextStatus === 'accepted' || nextStatus === 'delivered') {
-      stopOrderAlertLoop();
-      setIsRinging(false);
-      setActiveAlarmOrderIds((prev) => prev.filter((id) => id !== order.id));
-      setAcknowledgedOrderIds((prev) =>
-        prev.includes(order.id) ? prev : [...prev, order.id]
-      );
+      setActiveAlarmOrderIds((prev) => {
+        const remaining = prev.filter((id) => id !== order.id);
+        if (remaining.length === 0) {
+          stopOrderAlertLoop();
+          setIsRinging(false);
+        }
+        return remaining;
+      });
     }
 
     try {
@@ -1102,7 +980,7 @@ export function RiderApp() {
 
       const orderIsCod = isCodOrder(order);
       const stepMessages: Record<typeof nextStatus, string> = {
-        accepted: `Order ${order.id} accepted! Navigate to the Water Plant for pickup.`,
+        accepted: `Order ${order.id} accepted! Added to your Active Delivery List.`,
         reached_pickup: `Marked Reached Pickup Location for ${order.id}. Load items and tap Picked Up.`,
         out_for_delivery: `Order ${order.id} is Out for Delivery! Live GPS tracking started for customer.`,
         delivered: orderIsCod
@@ -1121,13 +999,14 @@ export function RiderApp() {
 
   const handleRejectOrder = async (order: Order) => {
     if (!sessionRiderId) return;
-    // Immediately stop siren & vibration on Reject tap
-    stopOrderAlertLoop();
-    setIsRinging(false);
-    setActiveAlarmOrderIds((prev) => prev.filter((id) => id !== order.id));
-    setAcknowledgedOrderIds((prev) =>
-      prev.includes(order.id) ? prev : [...prev, order.id]
-    );
+    setActiveAlarmOrderIds((prev) => {
+      const remaining = prev.filter((id) => id !== order.id);
+      if (remaining.length === 0) {
+        stopOrderAlertLoop();
+        setIsRinging(false);
+      }
+      return remaining;
+    });
     setUpdatingOrderId(order.id);
     try {
       const now = Date.now();
@@ -1194,8 +1073,7 @@ export function RiderApp() {
     }
   };
 
-  // Prevent accidental app exit on Android hardware/gesture Back button,
-  // and strictly lock navigation while an Active Order is unfinished.
+  // Prevent accidental app exit on Android hardware/gesture Back button
   const { exitPromptVisible } = useAndroidBackGuard({
     scope: 'rider',
     hasOpenOverlay: Boolean(mapModalTarget || selfieModalOpen || ringtoneModalOpen),
@@ -1207,12 +1085,6 @@ export function RiderApp() {
       } else if (ringtoneModalOpen) {
         setRingtoneModalOpen(false);
       }
-    },
-    locked: Boolean(lockedActiveOrder),
-    onLockedBackPress: () => {
-      setActionMessage(
-        'Active order in progress — tap Mark Order Completed or Reject Order to return to Rider Home.'
-      );
     },
     isOnSubView: riderTab !== 'active',
     onReturnHome: () => setRiderTab('active'),
@@ -1345,51 +1217,6 @@ export function RiderApp() {
     );
   }
 
-  // FULL-SCREEN LOCKED ACTIVE ORDER SCREEN:
-  // Auto-opens as soon as an order is assigned and stays locked until Marked Completed or Rejected.
-  if (lockedActiveOrder) {
-    const isLockedOrderRinging =
-      isRinging &&
-      ringingAssignedOrders.some((ro) => ro.id === lockedActiveOrder.id);
-
-    return (
-      <>
-        <RiderActiveOrderScreen
-          order={lockedActiveOrder}
-          queuedCount={Math.max(0, activeDeliveries.length - 1)}
-          nowMs={nowMs}
-          busy={updatingOrderId === lockedActiveOrder.id}
-          uploadingPhoto={uploadingPhotoOrderId === lockedActiveOrder.id}
-          photoError={photoErrorByOrder[lockedActiveOrder.id]}
-          isRinging={isLockedOrderRinging}
-          ringtoneName={ringtoneInfo.name}
-          actionMessage={actionMessage}
-          onDismissActionMessage={() => setActionMessage(null)}
-          onMuteAlert={(orderId) => handleAcknowledgeOrders([orderId])}
-          onAcceptOrder={(ord) => void handleUpdateOrderStep(ord, 'accepted')}
-          onRejectOrder={(ord) => void handleRejectOrder(ord)}
-          onMarkOutForDelivery={(ord) =>
-            void handleUpdateOrderStep(ord, 'out_for_delivery')
-          }
-          onMarkOrderCompleted={(ord) =>
-            void handleUpdateOrderStep(ord, 'delivered')
-          }
-          onCaptureDeliveryPhoto={(ord, e) =>
-            void handleCaptureDeliveryPhoto(ord, e)
-          }
-          onOpenMapModal={(target) => setMapModalTarget(target)}
-          onShowCopyToast={showCopyToast}
-        />
-        <InAppMapModal
-          target={mapModalTarget}
-          onClose={() => setMapModalTarget(null)}
-          onCopied={showCopyToast}
-        />
-        <CopyToast message={copyToast} />
-      </>
-    );
-  }
-
   return (
     <div className="app-scroll-page bg-slate-50 pb-safe-page">
       <NetworkStatusBanner />
@@ -1410,16 +1237,6 @@ export function RiderApp() {
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={handleTestRiderSound}
-              aria-label="Test delivery alert sound"
-              className="min-h-[38px] px-2.5 sm:px-3 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-blue-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-            >
-              <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span className="hidden sm:inline">Test Sound</span>
-            </button>
-
             <button
               type="button"
               onClick={() => {
@@ -1445,8 +1262,6 @@ export function RiderApp() {
                 setKeepAliveActive(false);
                 setIsRinging(false);
                 clearRiderSession();
-                clearCachedLockedOrder();
-                setCachedLockedOrder(null);
                 setSessionRiderId(null);
                 setRider(null);
                 if (exitingRiderId) {
@@ -1465,43 +1280,7 @@ export function RiderApp() {
         </div>
       </header>
 
-      {/* Clear Top Audio & Background Alerts Bar */}
-      <div className="bg-blue-950 text-white border-b border-blue-900">
-        <div className="max-w-5xl mx-auto px-3 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={handleAlertSoundOnButton}
-              data-testid="rider-alert-sound-btn"
-              className={`min-h-[38px] px-3.5 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 cursor-pointer transition-colors ${
-                soundEnabled
-                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                  : 'bg-slate-700 hover:bg-slate-600 text-white'
-              }`}
-            >
-              {soundEnabled ? (
-                <Volume2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-              ) : (
-                <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
-              )}
-              <span>
-                {soundEnabled ? 'Order Alert Sound: ON' : 'Order Alert Sound: MUTED (Tap to Enable)'}
-              </span>
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleMuteAlertButton}
-            className="min-h-[38px] px-3 rounded-xl bg-blue-900 hover:bg-blue-800 border border-blue-700 text-cyan-100 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
-          >
-            <BellOff className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-            <span>Mute Alert</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Loud New Delivery Assignment Alert Banner */}
+      {/* Automatic New Delivery Assignment Alert Banner (plays automatically until accepted or rejected) */}
       {isRinging && ringingAssignedOrders.length > 0 && (
         <div
           role="alert"
@@ -1512,23 +1291,14 @@ export function RiderApp() {
             <div className="flex items-center gap-2.5 text-sm font-extrabold">
               <Bell className="w-5 h-5 shrink-0" aria-hidden="true" />
               <span>
-                New Delivery Assigned! Ringing ({ringtoneInfo.name}) ·{' '}
+                New Delivery Assigned! Alert playing ({ringtoneInfo.name}) ·{' '}
                 {ringingAssignedOrders.length}{' '}
                 {ringingAssignedOrders.length === 1 ? 'order' : 'orders'} waiting
               </span>
             </div>
-            <button
-              type="button"
-              onClick={() =>
-                handleAcknowledgeOrders(
-                  ringingAssignedOrders.map((o) => o.id)
-                )
-              }
-              className="min-h-[40px] px-4 rounded-xl bg-slate-950 hover:bg-slate-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
-            >
-              <BellOff className="w-4 h-4" aria-hidden="true" />
-              <span>Mute Alert</span>
-            </button>
+            <span className="text-xs font-extrabold bg-slate-950/15 px-3 py-1.5 rounded-lg">
+              Accept or Reject below to stop alert
+            </span>
           </div>
         </div>
       )}
@@ -1736,16 +1506,18 @@ export function RiderApp() {
 
             <div className="bg-white rounded-2xl border border-slate-200 p-4">
               <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
-                Active Assigned
+                Active Delivery Slots
               </p>
               <p
                 data-testid="rider-stat-assigned"
                 className="font-display text-2xl font-extrabold text-cyan-800 mt-1 tabular-nums"
               >
-                {riderStats.activeCount}
+                {acceptCapacity.activeAcceptedCount} / {acceptCapacity.maxActive}
               </p>
               <p className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
-                {riderStats.assignedCount} total assigned
+                {incomingOrders.length > 0
+                  ? `${incomingOrders.length} new waiting to accept`
+                  : `${acceptCapacity.remainingSlots} open slots`}
               </p>
             </div>
           </section>
@@ -1790,13 +1562,30 @@ export function RiderApp() {
           </button>
         </div>
 
-        {/* Active Assigned Deliveries */}
+        {/* Active Deliveries (Up to 5 Simultaneous Accepted Orders + Incoming Assignments) */}
         {riderTab === 'active' ? (
-        <section aria-label="Assigned deliveries">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-display text-xl font-bold text-slate-900">
-              Active Assigned Orders ({activeDeliveries.length})
-            </h2>
+        <section aria-label="Assigned deliveries" className="space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="font-display text-xl font-bold text-slate-900">
+                Active Deliveries ({acceptedActiveOrders.length} / {MAX_RIDER_ACTIVE_ORDERS})
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Accept up to {MAX_RIDER_ACTIVE_ORDERS} orders at once and navigate or mark each delivery complete individually.
+              </p>
+            </div>
+            <span
+              data-testid="rider-active-capacity-badge"
+              className={`px-3 py-1.5 rounded-xl text-xs font-extrabold tabular-nums border ${
+                acceptCapacity.allowed
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-amber-50 border-amber-300 text-amber-900'
+              }`}
+            >
+              {acceptCapacity.allowed
+                ? `${acceptCapacity.activeAcceptedCount}/${acceptCapacity.maxActive} Active · ${acceptCapacity.remainingSlots} slots open`
+                : `${acceptCapacity.activeAcceptedCount}/${acceptCapacity.maxActive} Active · Max capacity reached`}
+            </span>
           </div>
 
           {activeDeliveries.length === 0 ? (
@@ -1812,13 +1601,41 @@ export function RiderApp() {
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {activeDeliveries.map((order) => {
+            <div className="space-y-6">
+              {incomingOrders.length > 0 && (
+                <div data-testid="rider-incoming-orders-section" className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="font-display text-base font-extrabold text-amber-900 flex items-center gap-2">
+                      <Bell className="w-4 h-4 text-amber-600 shrink-0" aria-hidden="true" />
+                      <span>New Orders Waiting to Accept ({incomingOrders.length})</span>
+                    </h3>
+                    {!acceptCapacity.allowed && (
+                      <span
+                        data-testid="rider-max-orders-warning"
+                        className="text-xs font-bold text-amber-900 bg-amber-100 border border-amber-300 px-2.5 py-1 rounded-lg"
+                      >
+                        5/5 active — mark 1 delivered to accept more
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div
+                data-testid="rider-active-delivery-list"
+                className="grid grid-cols-1 md:grid-cols-2 gap-4"
+              >
+                {[...incomingOrders, ...acceptedActiveOrders].map((order) => {
                 const canonicalStatus = normalizeOrderStatus(order.status);
                 const busy = updatingOrderId === order.id;
                 const uploadingPhoto = uploadingPhotoOrderId === order.id;
                 const hasDeliveryPhoto = isSafeImageDataUrl(order.deliveryPhoto);
                 const customerCoords = resolveOrderCustomerCoords(order);
+                const customerMapsUrl = buildGoogleMapsDrivingDirectionsUrl({
+                  lat: customerCoords?.lat ?? null,
+                  lng: customerCoords?.lng ?? null,
+                  address: order.address,
+                });
                 const displayCustomerPhone = formatDisplayPhone10(order.customerMobile);
                 const paymentBadge = getOrderPaymentBadge(order);
                 const orderIsCod = isCodOrder(order);
@@ -2053,15 +1870,21 @@ export function RiderApp() {
                           <div className="grid grid-cols-[1fr_auto] gap-2">
                             <button
                               type="button"
-                              disabled={busy}
+                              disabled={busy || !acceptCapacity.allowed}
                               data-testid={`rider-accept-order-${order.id}`}
                               onClick={() =>
                                 void handleUpdateOrderStep(order, 'accepted')
                               }
-                              className="w-full min-h-[52px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
+                              className="w-full min-h-[52px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                             >
                               <CheckCircle2 className="w-5 h-5 shrink-0" aria-hidden="true" />
-                              <span>{busy ? 'Accepting…' : 'Step 1: Accept Order'}</span>
+                              <span>
+                                {busy
+                                  ? 'Accepting…'
+                                  : !acceptCapacity.allowed
+                                    ? 'Max 5 Active Orders'
+                                    : 'Step 1: Accept Order'}
+                              </span>
                             </button>
 
                             <button
@@ -2075,43 +1898,46 @@ export function RiderApp() {
                               <span>Reject</span>
                             </button>
                           </div>
-
-                          {ringingAssignedOrders.some((ro) => ro.id === order.id) && (
-                            <button
-                              type="button"
-                              onClick={() => handleAcknowledgeOrders([order.id])}
-                              className="w-full min-h-[42px] rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                            >
-                              <BellOff className="w-4 h-4 shrink-0" aria-hidden="true" />
-                              <span>Mute Alert</span>
-                            </button>
-                          )}
                         </div>
                       )}
 
-                      {/* STEP 2: Navigate to Plant / Pickup Location -> Reached Pickup Location */}
+                      {/* STEP 2: Navigate to Plant / Customer -> Reached Pickup Location */}
                       {canonicalStatus === 'accepted' && (
                         <div className="space-y-2.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setMapModalTarget({
-                                title: 'Plant / Pickup Location',
-                                subtitle: `${order.id} · Water Plant Pickup`,
-                                address: WATER_PLANT_LOCATION.label,
-                                lat: WATER_PLANT_LOCATION.lat,
-                                lng: WATER_PLANT_LOCATION.lng,
-                              })
-                            }
-                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                          >
-                            <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
-                            <span>Navigate to Plant / Pickup Location</span>
-                          </button>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <a
+                              href={customerMapsUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              data-testid={`rider-open-maps-${order.id}`}
+                              className="min-h-[46px] px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors"
+                            >
+                              <Navigation className="w-4 h-4 shrink-0" aria-hidden="true" />
+                              <span>Open in Google Maps</span>
+                              <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setMapModalTarget({
+                                  title: 'Plant / Pickup Location',
+                                  subtitle: `${order.id} · Water Plant Pickup`,
+                                  address: WATER_PLANT_LOCATION.label,
+                                  lat: WATER_PLANT_LOCATION.lat,
+                                  lng: WATER_PLANT_LOCATION.lng,
+                                })
+                              }
+                              className="min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            >
+                              <MapPin className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                              <span>Plant Map</span>
+                            </button>
+                          </div>
 
                           <button
                             type="button"
                             disabled={busy}
+                            data-testid={`rider-reached-pickup-${order.id}`}
                             onClick={() =>
                               void handleUpdateOrderStep(order, 'reached_pickup')
                             }
@@ -2128,26 +1954,40 @@ export function RiderApp() {
                       {/* STEP 3: Order Picked Up / Out for Delivery */}
                       {canonicalStatus === 'reached_pickup' && (
                         <div className="space-y-2.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setMapModalTarget({
-                                title: 'Plant / Pickup Location',
-                                subtitle: `${order.id} · Water Plant Pickup`,
-                                address: WATER_PLANT_LOCATION.label,
-                                lat: WATER_PLANT_LOCATION.lat,
-                                lng: WATER_PLANT_LOCATION.lng,
-                              })
-                            }
-                            className="w-full min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                          >
-                            <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
-                            <span>Navigate to Plant / Pickup Location</span>
-                          </button>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <a
+                              href={customerMapsUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              data-testid={`rider-open-maps-${order.id}`}
+                              className="min-h-[44px] px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors"
+                            >
+                              <Navigation className="w-4 h-4 shrink-0" aria-hidden="true" />
+                              <span>Open in Google Maps</span>
+                              <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setMapModalTarget({
+                                  title: 'Plant / Pickup Location',
+                                  subtitle: `${order.id} · Water Plant Pickup`,
+                                  address: WATER_PLANT_LOCATION.label,
+                                  lat: WATER_PLANT_LOCATION.lat,
+                                  lng: WATER_PLANT_LOCATION.lng,
+                                })
+                              }
+                              className="min-h-[44px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 text-cyan-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            >
+                              <MapPin className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                              <span>Plant Map</span>
+                            </button>
+                          </div>
 
                           <button
                             type="button"
                             disabled={busy}
+                            data-testid={`rider-out-for-delivery-${order.id}`}
                             onClick={() =>
                               void handleUpdateOrderStep(order, 'out_for_delivery')
                             }
@@ -2163,25 +2003,38 @@ export function RiderApp() {
                         </div>
                       )}
 
-                      {/* STEP 4 & STEP 5: Navigate to Customer -> Take Delivery Photo -> Mark as Delivered (Cash Collected) */}
+                      {/* STEP 4 & STEP 5: Navigate to Customer -> Take Delivery Photo -> Mark as Delivered */}
                       {canonicalStatus === 'out_for_delivery' && (
                         <div className="space-y-3">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setMapModalTarget({
-                                title: 'Customer Delivery Location',
-                                subtitle: `${order.id} · ${order.customerName}`,
-                                address: order.address,
-                                lat: customerCoords?.lat ?? null,
-                                lng: customerCoords?.lng ?? null,
-                              })
-                            }
-                            className="w-full min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                          >
-                            <Navigation className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
-                            <span>Navigate to Customer Location</span>
-                          </button>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <a
+                              href={customerMapsUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              data-testid={`rider-open-maps-${order.id}`}
+                              className="min-h-[46px] px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors"
+                            >
+                              <Navigation className="w-4 h-4 shrink-0" aria-hidden="true" />
+                              <span>Open in Google Maps</span>
+                              <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setMapModalTarget({
+                                  title: 'Customer Delivery Location',
+                                  subtitle: `${order.id} · ${order.customerName}`,
+                                  address: order.address,
+                                  lat: customerCoords?.lat ?? null,
+                                  lng: customerCoords?.lng ?? null,
+                                })
+                              }
+                              className="min-h-[46px] px-3 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-300 text-cyan-950 font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            >
+                              <MapPin className="w-4 h-4 text-cyan-700 shrink-0" aria-hidden="true" />
+                              <span>View Map &amp; Copy</span>
+                            </button>
+                          </div>
 
                           <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-900 flex items-center gap-2">
                             <PackageCheck className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
@@ -2279,6 +2132,7 @@ export function RiderApp() {
                           <button
                             type="button"
                             disabled={busy || !hasDeliveryPhoto}
+                            data-testid={`rider-mark-delivered-${order.id}`}
                             onClick={() =>
                               void handleUpdateOrderStep(order, 'delivered')
                             }
@@ -2306,6 +2160,7 @@ export function RiderApp() {
                   </article>
                 );
               })}
+              </div>
             </div>
           )}
         </section>
@@ -2574,9 +2429,8 @@ export function RiderApp() {
 
             <div className="p-5 space-y-4">
               <p className="text-xs text-slate-600 leading-relaxed">
-                Loops every 2 seconds with vibration whenever a new delivery is
-                assigned until you tap Start Delivery or Acknowledge Order. Active
-                tone:{' '}
+                Plays automatically every 2 seconds with vibration whenever a new
+                delivery is assigned until you Accept or Reject it. Active tone:{' '}
                 <strong className="text-slate-900">{ringtoneInfo.name}</strong>
               </p>
 

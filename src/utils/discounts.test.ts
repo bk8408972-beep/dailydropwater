@@ -118,3 +118,16 @@ test('formatDiscountAmountBadge formats exact ₹X Discount badge whenever savin
   assert.equal(formatDiscountAmountBadge(0), null);
   assert.equal(formatDiscountAmountBadge(-5), null);
 });
+
+test('resolveProductPricing resolves discount whenever MRP > Selling Price unless explicitly disabled', () => {
+  const implicitDiscount = resolveProductPricing({
+    price: 70,
+    originalPrice: 90,
+  });
+  assert.equal(implicitDiscount.isDiscountActive, true);
+  assert.equal(implicitDiscount.effectivePrice, 70);
+  assert.equal(implicitDiscount.originalPrice, 90);
+  assert.equal(implicitDiscount.savingsPerUnit, 20);
+  assert.equal(formatDiscountAmountBadge(implicitDiscount.savingsPerUnit), '₹20 Discount');
+});
+

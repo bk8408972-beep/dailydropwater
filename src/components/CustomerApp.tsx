@@ -58,7 +58,6 @@ import {
   formatRupees,
   formatTimestamp,
   getStatusLabel,
-  isActiveOrderStatus,
   isSafeImageDataUrl,
   normalizeOrderStatus,
   PRODUCT_CATEGORIES,
@@ -121,6 +120,7 @@ import {
   buildRepeatOrderCart,
   checkMinimumOrderAmount,
   findLatestCustomerOrder,
+  partitionCustomerOrders,
 } from '../utils/customerFeatures';
 import { ProductImage } from './ProductImage';
 import { BrandLogo } from './BrandLogo';
@@ -522,10 +522,12 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     );
   }, [allOrders, customerProfile?.mobile, myOrders, normalizedTrackQuery, trackQueryDigits]);
 
-  const activeOrderCount = useMemo(
-    () => myOrders.filter((o) => isActiveOrderStatus(o.status)).length,
+  const { activeOrders: myActiveOrders, pastOrders: myPastOrders } = useMemo(
+    () => partitionCustomerOrders(myOrders),
     [myOrders]
   );
+
+  const activeOrderCount = myActiveOrders.length;
 
   // Detect live order status transitions -> play loud 3-note chime + vibrate + banner
   useEffect(() => {
@@ -971,7 +973,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
 
       const { order: newOrder, autoAssignedRider } = canonical;
 
-      await placeCustomerOrder(newOrder, existingCustomer);
+      await placeCustomerOrder(newOrder, existingCustomer, authoritativeCatalog);
 
       const savedProfile = saveCustomerProfile({
         name: newOrder.customerName,
@@ -1350,6 +1352,34 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
             {/* Compact Owner-Controlled Promo / Ad Banner (hidden completely when OFF) */}
             <PromoBanner settings={storeSettings} />
 
+            {/* Non-blocking live strip when customer already has 1+ active orders (never blocks placing another order) */}
+            {activeOrderCount > 0 && (
+              <div
+                data-testid="customer-active-orders-strip"
+                className="mb-4 rounded-2xl bg-blue-50 border border-blue-200 px-4 py-3 flex flex-wrap items-center justify-between gap-2.5"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Truck className="w-5 h-5 text-blue-700 shrink-0" aria-hidden="true" />
+                  <p className="text-xs sm:text-sm font-bold text-blue-950">
+                    {activeOrderCount === 1
+                      ? '1 active order in progress'
+                      : `${activeOrderCount} active orders in progress`}{' '}
+                    <span className="font-medium text-blue-800">
+                      — you can place another order anytime
+                    </span>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  data-testid="customer-strip-track-btn"
+                  onClick={() => setActiveTab('orders')}
+                  className="min-h-[38px] px-3.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs whitespace-nowrap cursor-pointer"
+                >
+                  Track Active ({activeOrderCount})
+                </button>
+              </div>
+            )}
+
             {/* Repeat Last Order Card (shown whenever customer has previous orders) */}
             {latestCustomerOrder && (
               <RepeatLastOrderCard
@@ -1712,10 +1742,11 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 />
                 <button
                   type="button"
+                  data-testid="my-orders-place-another-btn"
                   onClick={() => setActiveTab('shop')}
-                  className="min-h-[46px] px-5 rounded-xl bg-blue-50 text-blue-800 hover:bg-blue-100 font-semibold text-sm whitespace-nowrap cursor-pointer"
+                  className="min-h-[46px] px-5 rounded-xl bg-blue-700 text-white hover:bg-blue-800 font-bold text-sm whitespace-nowrap cursor-pointer"
                 >
-                  Order More
+                  + Place Another Order
                 </button>
               </div>
             </div>
@@ -1741,8 +1772,56 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 </p>
               </div>
             ) : (
-              <div className="space-y-4">
-                {myOrders.map((order) => {
+              <div className="space-y-6">
+                {/* Summary Bar for Active vs Past Orders */}
+                <div
+                  data-testid="my-orders-summary-bar"
+                  className="flex flex-wrap items-center justify-between gap-2 bg-white rounded-2xl border border-slate-200 px-4 py-3"
+                >
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-extrabold tabular-nums">
+                    <span
+                      data-testid="my-orders-active-count-badge"
+                      className="px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-800"
+                    >
+                      Active Orders: {myActiveOrders.length}
+                    </span>
+                    <span
+                      data-testid="my-orders-past-count-badge"
+                      className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 text-slate-700"
+                    >
+                      Past Orders: {myPastOrders.length}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Live status updates automatically
+                  </p>
+                </div>
+
+                {[
+                  {
+                    key: 'active',
+                    heading: `Active Orders (${myActiveOrders.length})`,
+                    testId: 'my-orders-active-section',
+                    list: myActiveOrders,
+                  },
+                  {
+                    key: 'past',
+                    heading: `Past Orders (${myPastOrders.length})`,
+                    testId: 'my-orders-past-section',
+                    list: myPastOrders,
+                  },
+                ]
+                  .filter((group) => group.list.length > 0)
+                  .map((group) => (
+                    <div
+                      key={group.key}
+                      data-testid={group.testId}
+                      className="space-y-4"
+                    >
+                      <h3 className="font-display text-base font-extrabold text-slate-900 flex items-center gap-2">
+                        <span>{group.heading}</span>
+                      </h3>
+                      {group.list.map((order) => {
                   const canonicalStatus = normalizeOrderStatus(order.status);
                   const liveStepIdx =
                     canonicalStatus === 'delivered'
@@ -2095,6 +2174,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                     </article>
                   );
                 })}
+                    </div>
+                  ))}
               </div>
             )}
           </section>
