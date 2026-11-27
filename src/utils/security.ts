@@ -17,6 +17,8 @@ import {
 import { getAvailablePaymentOptions, isValidUtr, sanitizeUtrInput } from './payment';
 import { checkDeliveryRadius, isValidGeoPoint } from './geo';
 import { loadOwnerSession } from './sessionStorage';
+import { resolveProductPricing } from './discounts';
+import { checkMinimumOrderAmount } from './customerFeatures';
 import type { RiderRecord } from '../types';
 
 const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F]/g;
@@ -263,6 +265,7 @@ export function validateAndBuildCanonicalOrder(
   const productById = new Map(catalog.map((p) => [p.id, p]));
   const items: OrderItem[] = [];
   let canonicalSubtotal = 0;
+  let totalSavings = 0;
 
   for (const [productId, rawQty] of Object.entries(cart)) {
     if (!Number.isInteger(rawQty) || rawQty <= 0) continue;
@@ -288,7 +291,10 @@ export function validateAndBuildCanonicalOrder(
         field: 'cart',
       };
     }
-    if (!Number.isFinite(product.price) || product.price <= 0) {
+
+    const pricing = resolveProductPricing(product);
+    const unitPrice = pricing.effectivePrice;
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
       return {
         ok: false,
         error: `Invalid price detected for "${product.name}".`,
@@ -296,12 +302,14 @@ export function validateAndBuildCanonicalOrder(
       };
     }
 
-    const unitPrice = Math.round(product.price);
     canonicalSubtotal += unitPrice * rawQty;
+    totalSavings += pricing.savingsPerUnit * rawQty;
     items.push({
       productId: product.id,
       name: sanitizeTextInput(product.name, 100),
       price: unitPrice,
+      originalPrice: pricing.originalPrice,
+      savingsPerUnit: pricing.savingsPerUnit,
       quantity: rawQty,
       category: product.category,
     });
@@ -311,6 +319,18 @@ export function validateAndBuildCanonicalOrder(
     return {
       ok: false,
       error: 'Please add at least one valid item to your cart.',
+      field: 'cart',
+    };
+  }
+
+  const minCheck = checkMinimumOrderAmount(
+    canonicalSubtotal,
+    storeSettings.minOrderAmount
+  );
+  if (!minCheck.met && minCheck.message) {
+    return {
+      ok: false,
+      error: minCheck.message,
       field: 'cart',
     };
   }
@@ -397,6 +417,7 @@ export function validateAndBuildCanonicalOrder(
     upiVerifiedAt: null,
     items,
     totalAmount: canonicalBill.totalAmount,
+    totalSavings,
     status: autoAssignedRider ? 'assigned' : 'pending',
     assignedRiderId: autoAssignedRider ? autoAssignedRider.id : null,
     assignedRiderName: autoAssignedRider ? autoAssignedRider.name : null,

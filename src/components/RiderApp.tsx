@@ -11,6 +11,7 @@ import {
   Copy,
   History,
   LogOut,
+  Mail,
   MapPin,
   Music,
   Navigation,
@@ -27,7 +28,12 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import type { CanonicalOrderStatus, Order, RiderRecord } from '../types';
+import type {
+  CanonicalOrderStatus,
+  Order,
+  RiderRecord,
+  StoreSettings,
+} from '../types';
 import {
   authenticateRider,
   dbPatch,
@@ -53,9 +59,14 @@ import {
   buildPhoneCallUrl,
   copyPhoneNumber,
   formatDisplayPhone10,
+  triggerPhoneCall,
   WATER_PLANT_LOCATION,
 } from '../utils/androidIntents';
-import { formatFloorLiftSummary } from '../utils/storeSettings';
+import {
+  DEFAULT_STORE_SETTINGS,
+  formatFloorLiftSummary,
+  normalizeStoreSettings,
+} from '../utils/storeSettings';
 import { compressDeliveryPhotoFile } from '../utils/imageCompress';
 import {
   ensureOrderAlertAudioPlaying,
@@ -177,6 +188,9 @@ export function RiderApp() {
     initialSavedSession?.loggedInAt ?? Date.now()
   );
   const [orders, setOrders] = useState<Order[]>([]);
+  const [storeSettings, setStoreSettings] = useState<StoreSettings>(
+    DEFAULT_STORE_SETTINGS
+  );
   const [cachedLockedOrder, setCachedLockedOrder] = useState<Order | null>(() =>
     loadCachedLockedOrder(initialSavedSession?.riderId ?? null)
   );
@@ -218,6 +232,19 @@ export function RiderApp() {
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [lastGpsSentAt, setLastGpsSentAt] = useState<number | null>(null);
   const latestCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+
+  // Sync live Owner support contact (mobile & email) from Firebase /storeSettings
+  useEffect(() => {
+    let active = true;
+    const unsub = subscribePath<Partial<StoreSettings>>('storeSettings', (raw) => {
+      if (!active) return;
+      setStoreSettings(normalizeStoreSettings(raw));
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, []);
   const lastBroadcastMsRef = useRef<number>(0);
 
   // Loud delivery assignment alarm & custom ringtone state
@@ -1278,6 +1305,39 @@ export function RiderApp() {
                 {signingIn ? 'Verifying Rider ID…' : 'Sign In to Rider App'}
               </button>
             </form>
+
+            <div
+              data-testid="rider-support-contact-card"
+              className="mt-5 pt-4 border-t border-slate-100 flex flex-col gap-2 text-xs text-slate-600"
+            >
+              <div className="font-bold text-slate-800">Owner Support Helpline</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={`tel:${storeSettings.supportMobile}`}
+                  data-testid="rider-support-call-btn"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    triggerPhoneCall(storeSettings.supportMobile, true);
+                  }}
+                  className="min-h-[38px] px-3 rounded-xl bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-900 font-bold inline-flex items-center gap-1.5"
+                >
+                  <Phone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span className="tabular-nums">
+                    Call Owner ({storeSettings.supportMobile})
+                  </span>
+                </a>
+                {storeSettings.supportEmail && (
+                  <a
+                    href={`mailto:${storeSettings.supportEmail}`}
+                    data-testid="rider-support-email-link"
+                    className="min-h-[38px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <Mail className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
+                    <span>{storeSettings.supportEmail}</span>
+                  </a>
+                )}
+              </div>
+            </div>
           </div>
         </main>
         <BackExitToast visible={exitPromptVisible} />
@@ -2343,6 +2403,47 @@ export function RiderApp() {
             )}
           </section>
         )}
+
+        {/* Owner Support Contact Card (Synced from Firebase) */}
+        <section
+          aria-label="Owner Support Helpline"
+          data-testid="rider-home-support-card"
+          className="mt-6 bg-white rounded-2xl border border-slate-200 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+        >
+          <div>
+            <p className="font-display text-sm font-bold text-slate-900">
+              Need Help? Contact DailyDrop Owner
+            </p>
+            <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
+              Phone: {storeSettings.supportMobile}
+              {storeSettings.supportEmail ? ` · ${storeSettings.supportEmail}` : ''}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href={`tel:${storeSettings.supportMobile}`}
+              data-testid="rider-home-call-owner-btn"
+              onClick={(e) => {
+                e.preventDefault();
+                triggerPhoneCall(storeSettings.supportMobile, true);
+              }}
+              className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs inline-flex items-center gap-1.5"
+            >
+              <Phone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>Call Owner ({storeSettings.supportMobile})</span>
+            </a>
+            {storeSettings.supportEmail && (
+              <a
+                href={`mailto:${storeSettings.supportEmail}`}
+                data-testid="rider-home-email-owner-link"
+                className="min-h-[42px] px-3.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 font-bold text-xs inline-flex items-center gap-1.5"
+              >
+                <Mail className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
+                <span>{storeSettings.supportEmail}</span>
+              </a>
+            )}
+          </div>
+        </section>
       </main>
 
       {/* Live Front-Camera Duty Selfie Modal */}

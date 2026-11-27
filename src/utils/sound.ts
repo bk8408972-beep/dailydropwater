@@ -590,3 +590,78 @@ export function testRingtone(role: RingtoneRole = 'owner'): boolean {
     ? playOwnerDualToneSiren(true)
     : playRiderDeliverySiren(true);
 }
+
+/**
+ * Plays a lively 1-second clapping + festive chime burst when a customer places an order with discount savings.
+ */
+export function playDiscountCelebrationClap(): boolean {
+  const ctx = getAudioContext();
+  if (!ctx) return false;
+  try {
+    if (ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {});
+    }
+    const now = ctx.currentTime;
+
+    // Generate short white-noise buffer for crisp hand-clap bursts
+    const sampleRate = ctx.sampleRate || 44100;
+    const clapDuration = 0.085;
+    const bufferLen = Math.floor(sampleRate * clapDuration);
+    const noiseBuffer = ctx.createBuffer(1, bufferLen, sampleRate);
+    const channelData = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferLen; i++) {
+      const decay = Math.pow(1 - i / bufferLen, 2.2);
+      channelData[i] = (Math.random() * 2 - 1) * decay;
+    }
+
+    // Staggered realistic applause rhythm across ~850ms
+    const clapOffsets = [0.0, 0.07, 0.13, 0.21, 0.28, 0.36, 0.44, 0.52, 0.61, 0.71, 0.8];
+    for (const offset of clapOffsets) {
+      const src = ctx.createBufferSource();
+      src.buffer = noiseBuffer;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(1150 + (offset * 500) % 450, now + offset);
+      filter.Q.setValueAtTime(1.4, now + offset);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.55, now + offset + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + clapDuration);
+
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      src.start(now + offset);
+      src.stop(now + offset + clapDuration + 0.01);
+    }
+
+    // Bright celebratory ascending chime chord (C5 -> E5 -> G5 -> C6)
+    const chimeNotes = [
+      { freq: 523.25, t: 0.02, dur: 0.22 },
+      { freq: 659.25, t: 0.12, dur: 0.24 },
+      { freq: 783.99, t: 0.22, dur: 0.26 },
+      { freq: 1046.5, t: 0.34, dur: 0.45 },
+    ];
+    for (const note of chimeNotes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(note.freq, now + note.t);
+      gain.gain.setValueAtTime(0.001, now + note.t);
+      gain.gain.exponentialRampToValueAtTime(0.28, now + note.t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + note.t + note.dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + note.t);
+      osc.stop(now + note.t + note.dur + 0.02);
+    }
+
+    triggerVibration([120, 60, 120]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+

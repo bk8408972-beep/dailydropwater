@@ -10,6 +10,7 @@ import type {
   RiderRecord,
   ServiceMode,
 } from '../types';
+import { resolveProductPricing } from './discounts';
 
 export const COD_DISPLAY_LABEL = 'Cash on Delivery (Pay Cash to Rider)';
 
@@ -269,20 +270,23 @@ export function getNextRiderId(existingRiders: RiderRecord[]): string {
 export function calculateCartTotals(
   cart: Record<string, number>,
   products: Product[]
-): { itemCount: number; subtotal: number } {
+): { itemCount: number; subtotal: number; totalSavings: number } {
   const productMap = new Map(products.map((p) => [p.id, p]));
   let itemCount = 0;
   let subtotal = 0;
+  let totalSavings = 0;
 
   for (const [productId, qty] of Object.entries(cart)) {
     if (qty <= 0) continue;
     const product = productMap.get(productId);
     if (!product) continue;
+    const pricing = resolveProductPricing(product);
     itemCount += qty;
-    subtotal += product.price * qty;
+    subtotal += pricing.effectivePrice * qty;
+    totalSavings += pricing.savingsPerUnit * qty;
   }
 
-  return { itemCount, subtotal };
+  return { itemCount, subtotal, totalSavings };
 }
 
 export interface CheckoutValidationInput {

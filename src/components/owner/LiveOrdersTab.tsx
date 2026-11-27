@@ -15,7 +15,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import type { Order, RiderRecord } from '../../types';
+import type { BulkBookingRequest, Order, RiderRecord } from '../../types';
 import {
   ownerDeleteOrder,
   ownerPatchOrder,
@@ -43,6 +43,7 @@ import {
 import { formatFloorLiftSummary } from '../../utils/storeSettings';
 import { getOrderPaymentBadge, isUpiOrder } from '../../utils/payment';
 import type { MapModalTarget } from '../InAppMapModal';
+import { BulkBookingsSection } from './BulkBookingsSection';
 
 const OWNER_STEPS = [
   { key: 'pending', label: 'Placed' },
@@ -54,6 +55,7 @@ const OWNER_STEPS = [
 
 interface LiveOrdersTabProps {
   orders: Order[];
+  bulkBookings?: BulkBookingRequest[];
   riders: RiderRecord[];
   completedCleanupCount: number;
   onOpenWeeklyCleanup: () => void;
@@ -63,6 +65,7 @@ interface LiveOrdersTabProps {
 
 export function LiveOrdersTab({
   orders,
+  bulkBookings = [],
   riders,
   completedCleanupCount,
   onOpenWeeklyCleanup,
@@ -228,6 +231,8 @@ export function LiveOrdersTab({
 
   return (
     <section aria-label="Live Orders" className="space-y-4">
+      <BulkBookingsSection bookings={bulkBookings} onNotify={onNotify} />
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-xl font-bold text-slate-900">

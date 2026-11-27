@@ -5,6 +5,27 @@ import type {
   StoreSettings,
 } from '../types';
 import { isActiveOrderStatus } from './domain';
+import {
+  DEFAULT_CONGRATS_POPUP_SECONDS,
+  DEFAULT_MIN_ORDER_AMOUNT,
+  DEFAULT_PROMO_BANNER_ACTION_URL,
+  DEFAULT_PROMO_BANNER_BUTTON_TEXT,
+  DEFAULT_PROMO_BANNER_ENABLED,
+  DEFAULT_PROMO_BANNER_INTERVAL_MINUTES,
+  DEFAULT_PROMO_BANNER_PHONE,
+  DEFAULT_PROMO_BANNER_TEXT,
+  DEFAULT_SUPPORT_EMAIL,
+  DEFAULT_SUPPORT_MOBILE,
+  sanitizeCongratsPopupSeconds,
+  sanitizeMinOrderAmount,
+  sanitizePromoBannerActionUrl,
+  sanitizePromoBannerButtonText,
+  sanitizePromoBannerIntervalMinutes,
+  sanitizePromoBannerPhone,
+  sanitizePromoBannerText,
+  sanitizeSupportEmail,
+  sanitizeSupportMobile,
+} from './customerFeatures';
 
 export const STORE_CLOSED_BANNER_MESSAGE =
   'Store is currently closed. We are not accepting orders right now.';
@@ -29,6 +50,17 @@ export const DEFAULT_STORE_SETTINGS: StoreSettings = {
   codEnabled: true,
   upiId: '',
   upiName: 'DailyDrop Water',
+  minOrderAmount: DEFAULT_MIN_ORDER_AMOUNT,
+  bulkOrdersEnabled: true,
+  supportMobile: DEFAULT_SUPPORT_MOBILE,
+  supportEmail: DEFAULT_SUPPORT_EMAIL,
+  congratsPopupSeconds: DEFAULT_CONGRATS_POPUP_SECONDS,
+  promoBannerEnabled: DEFAULT_PROMO_BANNER_ENABLED,
+  promoBannerText: DEFAULT_PROMO_BANNER_TEXT,
+  promoBannerButtonText: DEFAULT_PROMO_BANNER_BUTTON_TEXT,
+  promoBannerActionUrl: DEFAULT_PROMO_BANNER_ACTION_URL,
+  promoBannerIntervalMinutes: DEFAULT_PROMO_BANNER_INTERVAL_MINUTES,
+  promoBannerPhone: DEFAULT_PROMO_BANNER_PHONE,
 };
 
 export const PLATFORM_FEE_PRESETS = [0, 5, 7, 10] as const;
@@ -138,6 +170,38 @@ export function normalizeStoreSettings(
       typeof raw.upiName === 'string' && raw.upiName.trim()
         ? raw.upiName.trim()
         : DEFAULT_STORE_SETTINGS.upiName,
+    minOrderAmount: sanitizeMinOrderAmount(
+      raw.minOrderAmount,
+      DEFAULT_STORE_SETTINGS.minOrderAmount
+    ),
+    bulkOrdersEnabled:
+      typeof raw.bulkOrdersEnabled === 'boolean'
+        ? raw.bulkOrdersEnabled
+        : DEFAULT_STORE_SETTINGS.bulkOrdersEnabled,
+    supportMobile: sanitizeSupportMobile(
+      raw.supportMobile,
+      DEFAULT_STORE_SETTINGS.supportMobile
+    ),
+    supportEmail: sanitizeSupportEmail(raw.supportEmail),
+    congratsPopupSeconds: sanitizeCongratsPopupSeconds(
+      raw.congratsPopupSeconds,
+      DEFAULT_STORE_SETTINGS.congratsPopupSeconds
+    ),
+    promoBannerEnabled:
+      typeof raw.promoBannerEnabled === 'boolean'
+        ? raw.promoBannerEnabled
+        : DEFAULT_STORE_SETTINGS.promoBannerEnabled,
+    promoBannerText: sanitizePromoBannerText(raw.promoBannerText),
+    promoBannerButtonText: sanitizePromoBannerButtonText(
+      raw.promoBannerButtonText,
+      DEFAULT_STORE_SETTINGS.promoBannerButtonText
+    ),
+    promoBannerActionUrl: sanitizePromoBannerActionUrl(raw.promoBannerActionUrl),
+    promoBannerIntervalMinutes: sanitizePromoBannerIntervalMinutes(
+      raw.promoBannerIntervalMinutes,
+      DEFAULT_STORE_SETTINGS.promoBannerIntervalMinutes
+    ),
+    promoBannerPhone: sanitizePromoBannerPhone(raw.promoBannerPhone),
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : undefined,
   };
 }

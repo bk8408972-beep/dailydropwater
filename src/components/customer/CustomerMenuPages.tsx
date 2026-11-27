@@ -10,6 +10,7 @@ import {
   Headphones,
   History,
   LogOut,
+  Mail,
   Phone,
   Save,
   ShieldCheck,
@@ -43,6 +44,8 @@ interface CustomerMenuPagesProps {
   profile: CustomerProfile | null;
   orders: Order[];
   trackMobile: string;
+  supportMobile?: string;
+  supportEmail?: string;
   onBack: () => void;
   onSaveProfile: (profile: Omit<CustomerProfile, 'updatedAt'>) => void;
   onLogout: () => void;
@@ -56,6 +59,8 @@ export function CustomerMenuPages({
   profile,
   orders,
   trackMobile,
+  supportMobile = CUSTOMER_SUPPORT_PHONE,
+  supportEmail = '',
   onBack,
   onSaveProfile,
   onLogout,
@@ -63,6 +68,8 @@ export function CustomerMenuPages({
   onCopyFeedback,
   onOpenFullPrivacy,
 }: CustomerMenuPagesProps) {
+  const activeSupportPhone = supportMobile.trim() || CUSTOMER_SUPPORT_PHONE;
+  const activeSupportEmail = supportEmail.trim();
   const [nameInput, setNameInput] = useState(profile?.name ?? '');
   const [mobileInput, setMobileInput] = useState(profile?.mobile ?? trackMobile);
   const [addressInput, setAddressInput] = useState(profile?.address ?? '');
@@ -530,29 +537,45 @@ export function CustomerMenuPages({
                     data-testid="support-phone"
                     className="font-display text-base font-extrabold text-blue-800 tabular-nums mt-1"
                   >
-                    {CUSTOMER_SUPPORT_PHONE}
+                    {activeSupportPhone}
                   </p>
                 </div>
+
+                {activeSupportEmail && (
+                  <div className="sm:col-span-2 rounded-2xl bg-slate-50 border border-slate-200 p-4">
+                    <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
+                      <Mail className="w-4 h-4 text-blue-700" aria-hidden="true" />
+                      <span>Support Email</span>
+                    </p>
+                    <a
+                      href={`mailto:${activeSupportEmail}`}
+                      data-testid="support-email"
+                      className="font-display text-base font-extrabold text-blue-800 hover:underline mt-1 inline-block break-all"
+                    >
+                      {activeSupportEmail}
+                    </a>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-col sm:flex-row gap-2.5">
                 <a
-                  href={`tel:${CUSTOMER_SUPPORT_PHONE}`}
+                  href={`tel:${activeSupportPhone}`}
                   data-testid="support-call-btn"
                   onClick={(e) => {
                     e.preventDefault();
-                    triggerPhoneCall(CUSTOMER_SUPPORT_PHONE, true);
+                    triggerPhoneCall(activeSupportPhone, true);
                   }}
                   className="flex-1 min-h-[50px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-sm flex items-center justify-center gap-2 transition-colors"
                 >
                   <Phone className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span>Call Support ({CUSTOMER_SUPPORT_PHONE})</span>
+                  <span>Call Support ({activeSupportPhone})</span>
                 </a>
                 <button
                   type="button"
                   data-testid="support-copy-btn"
                   onClick={() =>
-                    void copyPhoneNumber(CUSTOMER_SUPPORT_PHONE, onCopyFeedback)
+                    void copyPhoneNumber(activeSupportPhone, onCopyFeedback)
                   }
                   className="min-h-[50px] px-5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-900 font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-colors"
                 >

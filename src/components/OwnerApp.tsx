@@ -24,6 +24,7 @@ import {
   Zap,
 } from 'lucide-react';
 import type {
+  BulkBookingRequest,
   CustomerRecord,
   Order,
   Product,
@@ -134,6 +135,7 @@ export function OwnerApp() {
 
   // Live RTDB collections
   const [orders, setOrders] = useState<Order[]>([]);
+  const [bulkBookings, setBulkBookings] = useState<BulkBookingRequest[]>([]);
   const [riders, setRiders] = useState<RiderRecord[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [customers, setCustomers] = useState<CustomerRecord[]>([]);
@@ -364,6 +366,19 @@ export function OwnerApp() {
       }
     );
 
+    const unsubBulkBookings = subscribePath<Record<string, BulkBookingRequest>>(
+      'settings/bulkBookings',
+      (data) => {
+        if (!active) return;
+        const list = data
+          ? Object.entries(data)
+              .map(([id, b]) => ({ ...b, id: b.id || id }))
+              .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+          : [];
+        setBulkBookings(list);
+      }
+    );
+
     return () => {
       active = false;
       initialOrdersLoadedRef.current = false;
@@ -373,6 +388,7 @@ export function OwnerApp() {
       unsubRiders();
       unsubProducts();
       unsubCustomers();
+      unsubBulkBookings();
     };
   }, [authenticated]);
 
@@ -742,7 +758,14 @@ export function OwnerApp() {
     icon: typeof ClipboardList;
     badge?: number;
   }> = [
-    { key: 'orders', label: 'Live Orders', icon: ClipboardList, badge: pendingCount },
+    {
+      key: 'orders',
+      label: 'Live Orders',
+      icon: ClipboardList,
+      badge:
+        pendingCount +
+        bulkBookings.filter((b) => b.status === 'pending').length,
+    },
     { key: 'riders', label: 'Riders & Duty', icon: Bike },
     { key: 'stock', label: 'Stock & Prices', icon: Package },
     { key: 'sales', label: 'Sales & Customers', icon: BarChart3 },
@@ -1037,6 +1060,7 @@ export function OwnerApp() {
         {activeTab === 'orders' && (
           <LiveOrdersTab
             orders={orders}
+            bulkBookings={bulkBookings}
             riders={riders}
             completedCleanupCount={completedOrdersForCleanup.length}
             onOpenWeeklyCleanup={() => setCleanupModalOpen(true)}

@@ -23,7 +23,34 @@ export interface StoreSettings {
   codEnabled: boolean;
   upiId: string;
   upiName: string;
+  minOrderAmount: number;
+  bulkOrdersEnabled: boolean;
+  supportMobile: string;
+  supportEmail: string;
+  congratsPopupSeconds: number;
+  promoBannerEnabled: boolean;
+  promoBannerText: string;
+  promoBannerButtonText: string;
+  promoBannerActionUrl: string;
+  promoBannerIntervalMinutes: number;
+  promoBannerPhone: string;
   updatedAt?: number;
+}
+
+export type BulkBookingStatus = 'pending' | 'accepted' | 'rejected';
+
+export interface BulkBookingRequest {
+  id: string;
+  customerName: string;
+  customerMobile: string;
+  address: string;
+  quantity: number;
+  eventDate: string;
+  timeSlot: string;
+  notes?: string;
+  status: BulkBookingStatus;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export type CanonicalOrderStatus =
@@ -54,6 +81,9 @@ export interface Product {
   name: string;
   category: ProductCategory;
   price: number;
+  originalPrice?: number;
+  offerPrice?: number;
+  discountEnabled?: boolean;
   stock: number;
   inStock: boolean;
   unit?: string;
@@ -65,6 +95,8 @@ export interface OrderItem {
   productId: string;
   name: string;
   price: number;
+  originalPrice?: number;
+  savingsPerUnit?: number;
   quantity: number;
   category: ProductCategory;
 }
@@ -114,6 +146,7 @@ export interface Order {
   floorLevel?: FloorLevel | null;
   hasLift?: boolean | null;
   itemsSubtotal?: number;
+  totalSavings?: number;
   platformFee?: number;
   deliveryFee?: number;
   floorCharge?: number;

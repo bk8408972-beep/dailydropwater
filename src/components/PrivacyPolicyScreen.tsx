@@ -1,11 +1,14 @@
-import { ArrowLeft, Copy, Lock, MapPin, Phone, ShieldCheck, Trash2, UserX } from 'lucide-react';
-import { useState } from 'react';
+import { ArrowLeft, Copy, Lock, Mail, MapPin, Phone, ShieldCheck, Trash2, UserX } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { BrandLogo } from './BrandLogo';
 import { copyPhoneNumber, triggerPhoneCall } from '../utils/androidIntents';
 import {
   CUSTOMER_SUPPORT_HOURS,
   CUSTOMER_SUPPORT_PHONE,
 } from './customer/CustomerMenuPages';
+import { subscribePath } from '../services/firebaseDb';
+import { normalizeStoreSettings } from '../utils/storeSettings';
+import type { StoreSettings } from '../types';
 
 interface PrivacyPolicyScreenProps {
   onBackToApp: () => void;
@@ -13,6 +16,22 @@ interface PrivacyPolicyScreenProps {
 
 export function PrivacyPolicyScreen({ onBackToApp }: PrivacyPolicyScreenProps) {
   const [copiedMsg, setCopiedMsg] = useState<string | null>(null);
+  const [supportMobile, setSupportMobile] = useState(CUSTOMER_SUPPORT_PHONE);
+  const [supportEmail, setSupportEmail] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    const unsub = subscribePath<Partial<StoreSettings>>('storeSettings', (raw) => {
+      if (!active) return;
+      const normalized = normalizeStoreSettings(raw);
+      setSupportMobile(normalized.supportMobile || CUSTOMER_SUPPORT_PHONE);
+      setSupportEmail(normalized.supportEmail || '');
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, []);
 
   return (
     <div
@@ -155,26 +174,36 @@ export function PrivacyPolicyScreen({ onBackToApp }: PrivacyPolicyScreenProps) {
               <div>
                 <p className="font-bold">DailyDrop Water — Customer Support Desk</p>
                 <p className="text-xs text-blue-800 mt-0.5">
-                  Support Hours: {CUSTOMER_SUPPORT_HOURS} · Phone: {CUSTOMER_SUPPORT_PHONE}
+                  Support Hours: {CUSTOMER_SUPPORT_HOURS} · Phone: {supportMobile}
+                  {supportEmail ? ` · Email: ${supportEmail}` : ''}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
                 <a
-                  href={`tel:${CUSTOMER_SUPPORT_PHONE}`}
+                  href={`tel:${supportMobile}`}
                   data-testid="privacy-support-call-btn"
                   onClick={(e) => {
                     e.preventDefault();
-                    triggerPhoneCall(CUSTOMER_SUPPORT_PHONE, true);
+                    triggerPhoneCall(supportMobile, true);
                   }}
                   className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs inline-flex items-center gap-1.5 transition-colors"
                 >
                   <Phone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                  <span>Call {CUSTOMER_SUPPORT_PHONE}</span>
+                  <span>Call {supportMobile}</span>
                 </a>
+                {supportEmail && (
+                  <a
+                    href={`mailto:${supportEmail}`}
+                    className="min-h-[42px] px-3.5 rounded-xl bg-white hover:bg-blue-100 border border-blue-300 text-blue-900 font-bold text-xs inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Mail className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>{supportEmail}</span>
+                  </a>
+                )}
                 <button
                   type="button"
                   onClick={() => {
-                    void copyPhoneNumber(CUSTOMER_SUPPORT_PHONE, (msg) => {
+                    void copyPhoneNumber(supportMobile, (msg) => {
                       setCopiedMsg(msg);
                       window.setTimeout(() => setCopiedMsg(null), 2200);
                     });

@@ -112,6 +112,15 @@ import {
   sanitizePhone10,
   validateAndBuildCanonicalOrder,
 } from '../utils/security';
+import {
+  calculateOrderSavings,
+  resolveProductPricing,
+} from '../utils/discounts';
+import {
+  buildRepeatOrderCart,
+  checkMinimumOrderAmount,
+  findLatestCustomerOrder,
+} from '../utils/customerFeatures';
 import { ProductImage } from './ProductImage';
 import { BrandLogo } from './BrandLogo';
 import { LiveOrderMap } from './LiveOrderMap';
@@ -121,6 +130,10 @@ import { CopyToast } from './CopyToast';
 import { NetworkStatusBanner } from './NetworkStatusBanner';
 import { UpiQrCode } from './UpiQrCode';
 import { GpsDisclosureModal } from './GpsDisclosureModal';
+import { DiscountCelebrationOverlay } from './DiscountCelebrationOverlay';
+import { RepeatLastOrderCard } from './customer/RepeatLastOrderCard';
+import { PromoBanner } from './customer/PromoBanner';
+import { BulkBookingModal } from './customer/BulkBookingModal';
 import {
   CustomerMenuPages,
   type CustomerMenuPage,
@@ -206,6 +219,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   const [menuDropdownOpen, setMenuDropdownOpen] = useState(false);
   const [activeMenuPage, setActiveMenuPage] = useState<CustomerMenuPage | null>(null);
   const menuContainerRef = useRef<HTMLDivElement | null>(null);
+  const [celebrationSavings, setCelebrationSavings] = useState<number | null>(null);
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
 
   // Checkout drawer state
   const [checkoutOpen, setCheckoutOpen] = useState(false);
@@ -301,6 +316,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     hasOpenOverlay: Boolean(
       gpsDisclosureOpen ||
         outsideRadiusModal ||
+        bulkModalOpen ||
         zoomPhoto ||
         checkoutOpen ||
         menuDropdownOpen
@@ -310,6 +326,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         setGpsDisclosureOpen(false);
       } else if (outsideRadiusModal) {
         setOutsideRadiusModal(null);
+      } else if (bulkModalOpen) {
+        setBulkModalOpen(false);
       } else if (zoomPhoto) {
         setZoomPhoto(null);
       } else if (menuDropdownOpen) {
@@ -410,10 +428,61 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
     return products.filter((p) => p.category === selectedCategory);
   }, [products, selectedCategory]);
 
-  const { itemCount, subtotal } = useMemo(
+  const { itemCount, subtotal, totalSavings } = useMemo(
     () => calculateCartTotals(cart, products),
     [cart, products]
   );
+
+  const minOrderCheck = useMemo(
+    () => checkMinimumOrderAmount(subtotal, storeSettings.minOrderAmount),
+    [subtotal, storeSettings.minOrderAmount]
+  );
+
+  const latestCustomerOrder = useMemo(
+    () =>
+      findLatestCustomerOrder(
+        allOrders,
+        customerProfile?.mobile || trackMobile || customerMobile
+      ),
+    [allOrders, customerProfile?.mobile, trackMobile, customerMobile]
+  );
+
+  useEffect(() => {
+    if (!storeSettings.bulkOrdersEnabled && serviceMode === 'events') {
+      setServiceMode('fast');
+    }
+    if (!storeSettings.bulkOrdersEnabled && bulkModalOpen) {
+      setBulkModalOpen(false);
+    }
+  }, [storeSettings.bulkOrdersEnabled, serviceMode, bulkModalOpen]);
+
+  const handleReorderNow = () => {
+    if (!latestCustomerOrder) return;
+    const rebuilt = buildRepeatOrderCart(latestCustomerOrder, products);
+    if (rebuilt.addedItemCount === 0) {
+      showCopyToast('Items from your last order are currently out of stock.');
+      return;
+    }
+    setCart(rebuilt.cart);
+    setServiceMode('fast');
+    setFormErrors({});
+    setLocationError(null);
+    setCheckoutOpen(true);
+
+    const notices: string[] = [];
+    if (rebuilt.unavailableNames.length > 0) {
+      notices.push(`Skipped out-of-stock: ${rebuilt.unavailableNames.join(', ')}`);
+    }
+    if (rebuilt.adjustedStockNames.length > 0) {
+      notices.push(`Stock adjusted: ${rebuilt.adjustedStockNames.join(', ')}`);
+    }
+    if (rebuilt.priceChangedCount > 0) {
+      notices.push('Latest live prices applied');
+    }
+    if (notices.length > 0) {
+      showCopyToast(notices.join(' · '));
+    }
+  };
 
   const normalizedTrackQuery = trackMobile.trim();
   const trackQueryDigits = normalizedTrackQuery.replace(/\D/g, '');
@@ -917,11 +986,15 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         // ignore storage restrictions
       }
 
+      const orderSavings =
+        typeof newOrder.totalSavings === 'number'
+          ? newOrder.totalSavings
+          : calculateOrderSavings(newOrder.items);
+
       setTrackMobile(newOrder.customerMobile);
       setCart({});
       setUpiUtr('');
       setCheckoutOpen(false);
-      setActiveTab('orders');
       const paySummary =
         newOrder.paymentMethod === 'UPI'
           ? `UPI PAYMENT PENDING (UTR: ${newOrder.upiUtr})`
@@ -931,6 +1004,11 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           ? `Order ${newOrder.id} placed & assigned to ${autoAssignedRider.name} (${autoAssignedRider.id})! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
           : `Order ${newOrder.id} placed! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
       );
+      if (orderSavings > 0) {
+        setCelebrationSavings(orderSavings);
+      } else {
+        setActiveTab('orders');
+      }
     } catch (err) {
       setFormErrors({
         submit:
@@ -952,6 +1030,8 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
           profile={customerProfile}
           orders={customerHistoryOrders}
           trackMobile={customerProfile?.mobile || trackQueryDigits}
+          supportMobile={storeSettings.supportMobile}
+          supportEmail={storeSettings.supportEmail}
           onBack={() => setActiveMenuPage(null)}
           onSaveProfile={handleSaveCustomerProfile}
           onLogout={handleCustomerLogout}
@@ -1265,9 +1345,25 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
 
         {activeTab === 'shop' ? (
           <>
+            {/* Compact Owner-Controlled Promo / Ad Banner (hidden completely when OFF) */}
+            <PromoBanner settings={storeSettings} />
+
+            {/* Repeat Last Order Card (shown whenever customer has previous orders) */}
+            {latestCustomerOrder && (
+              <RepeatLastOrderCard
+                lastOrder={latestCustomerOrder}
+                onReorderNow={handleReorderNow}
+                disabled={loadingProducts || products.length === 0}
+              />
+            )}
+
             {/* Two Service Modes Switcher */}
             <section aria-label="Service mode" className="mb-6">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div
+                className={`grid grid-cols-1 ${
+                  storeSettings.bulkOrdersEnabled ? 'sm:grid-cols-2' : ''
+                } gap-3`}
+              >
                 <button
                   type="button"
                   onClick={() => setServiceMode('fast')}
@@ -1301,41 +1397,34 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   </div>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => setServiceMode('events')}
-                  aria-pressed={serviceMode === 'events'}
-                  className={`min-h-[68px] p-4 rounded-2xl border text-left transition-all flex items-center gap-3.5 cursor-pointer ${
-                    serviceMode === 'events'
-                      ? 'bg-cyan-700 border-cyan-700 text-white shadow-sm'
-                      : 'bg-white border-slate-200 text-slate-900 hover:border-cyan-400'
-                  }`}
-                >
-                  <div
-                    className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${
-                      serviceMode === 'events'
-                        ? 'bg-white text-cyan-800'
-                        : 'bg-cyan-50 text-cyan-700'
-                    }`}
+                {storeSettings.bulkOrdersEnabled && (
+                  <button
+                    type="button"
+                    data-testid="events-bulk-order-card"
+                    onClick={() => setBulkModalOpen(true)}
+                    className="min-h-[68px] p-4 rounded-2xl border border-cyan-300 bg-gradient-to-r from-cyan-50 via-white to-blue-50 text-slate-900 hover:border-cyan-500 hover:shadow-sm text-left transition-all flex items-center justify-between gap-3 cursor-pointer"
                   >
-                    <Sparkles className="w-5 h-5" aria-hidden="true" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="font-display font-bold text-base leading-snug">
-                      Every Events Water Supply
+                    <div className="flex items-center gap-3.5 min-w-0">
+                      <div className="w-11 h-11 rounded-xl bg-cyan-700 text-white flex items-center justify-center shrink-0">
+                        <Sparkles className="w-5 h-5" aria-hidden="true" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-display font-bold text-base leading-snug text-slate-900">
+                          Events / Function Bulk Order
+                        </div>
+                        <div className="text-xs text-slate-600 mt-0.5">
+                          Book 10, 20, 50+ water cans for functions &amp; gatherings
+                        </div>
+                      </div>
                     </div>
-                    <div
-                      className={`text-xs mt-0.5 ${
-                        serviceMode === 'events' ? 'text-cyan-100' : 'text-slate-500'
-                      }`}
-                    >
-                      Bulk cans &amp; bottle boxes for functions &amp; gatherings
-                    </div>
-                  </div>
-                </button>
+                    <span className="text-xs font-extrabold text-cyan-800 bg-cyan-100 px-2.5 py-1.5 rounded-lg shrink-0">
+                      Book Now
+                    </span>
+                  </button>
+                )}
               </div>
 
-              {serviceMode === 'events' && (
+              {storeSettings.bulkOrdersEnabled && serviceMode === 'events' && (
                 <div className="mt-3 bg-white border border-cyan-200 rounded-2xl p-4 sm:p-5">
                   <div className="flex items-center gap-2 text-cyan-900 font-display font-bold text-sm mb-3">
                     <Calendar className="w-4 h-4 text-cyan-700" aria-hidden="true" />
@@ -1399,7 +1488,10 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
             </section>
 
             {/* Category Filter Tabs */}
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 mb-4">
+            <div
+              id="customer-catalog"
+              className="scroll-mt-24 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 mb-4"
+            >
               <div
                 role="tablist"
                 aria-label="Product categories"
@@ -1471,14 +1563,24 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 {filteredProducts.map((product) => {
                   const qty = cart[product.id] ?? 0;
                   const available = product.inStock && product.stock > 0;
+                  const pricing = resolveProductPricing(product);
                   return (
                     <article
                       key={product.id}
+                      data-testid={`customer-product-card-${product.id}`}
                       className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col justify-between transition-shadow hover:shadow-sm"
                     >
                       <div>
-                        <div className="aspect-[4/3] bg-slate-100 overflow-hidden">
+                        <div className="relative aspect-[4/3] bg-slate-100 overflow-hidden">
                           <ProductImage product={product} />
+                          {pricing.isDiscountActive && (
+                            <span
+                              data-testid={`product-save-badge-${product.id}`}
+                              className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-xs font-extrabold tracking-wide shadow-sm tabular-nums"
+                            >
+                              SAVE {formatRupees(pricing.savingsPerUnit)}
+                            </span>
+                          )}
                         </div>
                         <div className="p-4">
                           <div className="flex items-center gap-1.5 text-xs text-slate-500 font-medium mb-1">
@@ -1504,8 +1606,27 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                       </div>
 
                       <div className="px-4 pb-4 pt-2 border-t border-slate-100 flex items-center justify-between gap-3">
-                        <div className="font-display text-xl font-extrabold text-slate-900 tabular-nums">
-                          {formatRupees(product.price)}
+                        <div className="flex flex-col">
+                          {pricing.isDiscountActive ? (
+                            <div className="flex items-baseline gap-2">
+                              <span
+                                data-testid={`product-offer-price-${product.id}`}
+                                className="font-display text-xl font-extrabold text-slate-900 tabular-nums"
+                              >
+                                {formatRupees(pricing.effectivePrice)}
+                              </span>
+                              <span
+                                data-testid={`product-mrp-price-${product.id}`}
+                                className="text-sm font-semibold text-slate-400 line-through tabular-nums"
+                              >
+                                {formatRupees(pricing.originalPrice)}
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="font-display text-xl font-extrabold text-slate-900 tabular-nums">
+                              {formatRupees(pricing.effectivePrice)}
+                            </div>
+                          )}
                         </div>
 
                         {!available ? (
@@ -2001,29 +2122,45 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       {/* Compact Sticky Cart Bar (only when items > 0 and on shop view) */}
       {activeTab === 'shop' && itemCount > 0 && (
         <div className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 px-4 py-2.5 pb-safe">
-          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
-            <div>
-              <div className="text-xs text-slate-500 font-semibold tabular-nums">
-                {itemCount} {itemCount === 1 ? 'item' : 'items'} ·{' '}
-                {serviceMode === 'events' ? 'Events Supply' : '15–20 Mins Fast'}
+          <div className="max-w-6xl mx-auto space-y-2">
+            {!minOrderCheck.met && minOrderCheck.message && (
+              <div
+                role="alert"
+                data-testid="min-order-warning-banner"
+                className="rounded-xl bg-amber-50 border border-amber-300 px-3 py-2 text-xs sm:text-sm font-bold text-amber-950 flex items-center gap-2"
+              >
+                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" aria-hidden="true" />
+                <span>{minOrderCheck.message}</span>
               </div>
-              <div className="font-display text-lg font-extrabold text-slate-900 tabular-nums">
-                {formatRupees(subtotal)}
-              </div>
-            </div>
+            )}
 
-            <button
-              type="button"
-              onClick={() => {
-                setFormErrors({});
-                setLocationError(null);
-                setCheckoutOpen(true);
-              }}
-              className="min-h-[48px] px-6 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.98] text-white font-bold text-sm sm:text-base flex items-center gap-2 transition-all cursor-pointer"
-            >
-              <ShoppingBag className="w-4 h-4" aria-hidden="true" />
-              <span>Checkout</span>
-            </button>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-xs text-slate-500 font-semibold tabular-nums">
+                  {itemCount} {itemCount === 1 ? 'item' : 'items'} ·{' '}
+                  {serviceMode === 'events' ? 'Events Supply' : '15–20 Mins Fast'}
+                </div>
+                <div className="font-display text-lg font-extrabold text-slate-900 tabular-nums">
+                  {formatRupees(subtotal)}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                data-testid="sticky-checkout-btn"
+                disabled={!minOrderCheck.met}
+                onClick={() => {
+                  if (!minOrderCheck.met) return;
+                  setFormErrors({});
+                  setLocationError(null);
+                  setCheckoutOpen(true);
+                }}
+                className="min-h-[48px] px-6 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.98] text-white font-bold text-sm sm:text-base flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ShoppingBag className="w-4 h-4" aria-hidden="true" />
+                <span>{minOrderCheck.met ? 'Checkout' : `Add ₹${minOrderCheck.remaining} More`}</span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2078,16 +2215,24 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 {Object.entries(cart).map(([productId, qty]) => {
                   const p = products.find((item) => item.id === productId);
                   if (!p || qty <= 0) return null;
+                  const pricing = resolveProductPricing(p);
                   return (
                     <div
                       key={productId}
-                      className="flex items-center justify-between text-sm"
+                      className="flex items-center justify-between text-sm gap-2"
                     >
                       <span className="text-slate-700 font-medium">
                         {qty} × {p.name}
                       </span>
-                      <span className="font-semibold text-slate-900 tabular-nums">
-                        {formatRupees(p.price * qty)}
+                      <span className="flex items-baseline gap-1.5 tabular-nums">
+                        {pricing.isDiscountActive && (
+                          <span className="text-xs text-slate-400 line-through">
+                            {formatRupees(pricing.originalPrice * qty)}
+                          </span>
+                        )}
+                        <span className="font-semibold text-slate-900">
+                          {formatRupees(pricing.effectivePrice * qty)}
+                        </span>
                       </span>
                     </div>
                   );
@@ -2100,6 +2245,17 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                       {formatRupees(bill.itemsSubtotal)}
                     </span>
                   </div>
+                  {totalSavings > 0 && (
+                    <div
+                      data-testid="checkout-discount-savings"
+                      className="flex items-center justify-between text-emerald-700 font-bold"
+                    >
+                      <span>Discount Savings</span>
+                      <span className="tabular-nums">
+                        SAVE {formatRupees(totalSavings)}
+                      </span>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <span>Platform Fee</span>
                     <span className="font-semibold text-slate-800 tabular-nums">
@@ -2707,6 +2863,17 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 </p>
               )}
 
+              {!minOrderCheck.met && minOrderCheck.message && (
+                <div
+                  role="alert"
+                  data-testid="checkout-min-order-warning"
+                  className="rounded-xl bg-amber-50 border border-amber-300 px-3.5 py-3 text-xs sm:text-sm font-bold text-amber-950 flex items-start gap-2"
+                >
+                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" aria-hidden="true" />
+                  <span>{minOrderCheck.message}</span>
+                </div>
+              )}
+
               <div className="pb-safe">
                 <button
                   type="submit"
@@ -2714,13 +2881,14 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   disabled={
                     !storeSettings.isOpen ||
                     paymentAvailability.checkoutDisabled ||
+                    !minOrderCheck.met ||
                     submittingOrder ||
                     !hasRequiredCheckoutFields
                   }
                   className={`w-full min-h-[52px] rounded-xl active:scale-[0.99] text-white font-bold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer ${
                     isOutsideDeliveryRadius
                       ? 'bg-red-600 hover:bg-red-700'
-                      : isGpsRequiredAndMissing
+                      : !minOrderCheck.met || isGpsRequiredAndMissing
                         ? 'bg-amber-600 hover:bg-amber-700'
                         : 'bg-blue-700 hover:bg-blue-800'
                   }`}
@@ -2729,15 +2897,17 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                     ? 'Store Closed — Ordering Paused'
                     : paymentAvailability.checkoutDisabled
                       ? 'Checkout Disabled (No Payment Mode Active)'
-                      : isOutsideDeliveryRadius
-                        ? `Outside ${radiusCheck?.maxRadiusKm ?? storeSettings.deliveryRadiusKm} km delivery radius`
-                        : isGpsRequiredAndMissing
-                          ? 'Share GPS Location to Place Order'
-                          : isUpiMissingOrInvalidUtr
-                            ? 'Enter 12-Digit UTR to Place Order'
-                            : submittingOrder
-                              ? 'Placing Order…'
-                              : `Place Order · ${formatRupees(bill.totalAmount)}`}
+                      : !minOrderCheck.met
+                        ? `Add ₹${minOrderCheck.remaining} more to reach ₹${minOrderCheck.minOrderAmount} min order`
+                        : isOutsideDeliveryRadius
+                          ? `Outside ${radiusCheck?.maxRadiusKm ?? storeSettings.deliveryRadiusKm} km delivery radius`
+                          : isGpsRequiredAndMissing
+                            ? 'Share GPS Location to Place Order'
+                            : isUpiMissingOrInvalidUtr
+                              ? 'Enter 12-Digit UTR to Place Order'
+                              : submittingOrder
+                                ? 'Placing Order…'
+                                : `Place Order · ${formatRupees(bill.totalAmount)}`}
                 </button>
               </div>
             </form>
@@ -2851,6 +3021,26 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         deliveryRadiusKm={storeSettings.deliveryRadiusKm}
         onAccept={handleAcceptGpsDisclosure}
         onDecline={() => setGpsDisclosureOpen(false)}
+      />
+
+      <BulkBookingModal
+        open={bulkModalOpen}
+        supportMobile={storeSettings.supportMobile}
+        supportEmail={storeSettings.supportEmail}
+        customerProfile={customerProfile}
+        onClose={() => setBulkModalOpen(false)}
+        onSubmitted={(booking) => {
+          showCopyToast(`Bulk booking ${booking.id} sent to Owner!`);
+        }}
+      />
+
+      <DiscountCelebrationOverlay
+        totalSavings={celebrationSavings}
+        durationSeconds={storeSettings.congratsPopupSeconds}
+        onComplete={() => {
+          setCelebrationSavings(null);
+          setActiveTab('orders');
+        }}
       />
 
       <CopyToast message={copyToast} />

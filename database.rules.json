@@ -65,6 +65,15 @@
         ".read": "auth != null && auth.token.role === 'owner'",
         ".write": "auth != null && auth.token.role === 'owner'",
         ".validate": "newData.hasChildren(['password', 'updatedAt']) && newData.child('password').isString() && newData.child('password').val().length >= 6 && newData.child('password').val().length <= 128"
+      },
+      "bulkBookings": {
+        ".read": "auth != null && auth.token.role === 'owner'",
+        ".indexOn": ["createdAt", "status"],
+        "$bookingId": {
+          ".read": true,
+          ".write": "(auth != null && auth.token.role === 'owner') || (!data.exists() && newData.exists() && root.child('storeSettings/bulkOrdersEnabled').val() !== false)",
+          ".validate": "!newData.exists() || (newData.hasChildren(['id', 'customerName', 'customerMobile', 'address', 'quantity', 'eventDate', 'timeSlot', 'status', 'createdAt']) && newData.child('id').val() === $bookingId && newData.child('customerName').isString() && newData.child('customerName').val().length >= 2 && newData.child('customerMobile').isString() && newData.child('customerMobile').val().matches(/^[0-9]{10}$/) && newData.child('quantity').isNumber() && newData.child('quantity').val() >= 1 && newData.child('quantity').val() <= 10000 && newData.child('status').isString() && newData.child('status').val().matches(/^(pending|accepted|rejected)$/))"
+        }
       }
     },
 

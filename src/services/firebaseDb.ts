@@ -1,4 +1,6 @@
 import type {
+  BulkBookingRequest,
+  BulkBookingStatus,
   CustomerRecord,
   Order,
   OwnerAuthConfig,
@@ -65,7 +67,9 @@ export async function dbSet<T>(path: string, data: T): Promise<T> {
   if (!res.ok) {
     throw new Error(`Database write failed (${res.status}) for /${path}`);
   }
-  return (await res.json()) as T;
+  const result = (await res.json()) as T;
+  triggerSubscribersForPath(path);
+  return result;
 }
 
 export async function dbPatch<T extends Record<string, unknown>>(
@@ -80,7 +84,9 @@ export async function dbPatch<T extends Record<string, unknown>>(
   if (!res.ok) {
     throw new Error(`Database update failed (${res.status}) for /${path}`);
   }
-  return (await res.json()) as T;
+  const result = (await res.json()) as T;
+  triggerSubscribersForPath(path);
+  return result;
 }
 
 export async function dbDelete(path: string): Promise<void> {
@@ -90,6 +96,7 @@ export async function dbDelete(path: string): Promise<void> {
   if (!res.ok) {
     throw new Error(`Database delete failed (${res.status}) for /${path}`);
   }
+  triggerSubscribersForPath(path);
 }
 
 /**
@@ -165,9 +172,29 @@ function applyRtdbEvent(
   return root;
 }
 
+// Keep at most 4 live SSE connections per browser tab so HTTP/1.1's 6-connection
+// per-origin limit always reserves free sockets for fast REST writes & reads.
+const MAX_CONCURRENT_SSE = 4;
+let activeEventSourceCount = 0;
+const registeredRefreshers = new Set<{ path: string; refresh: () => void }>();
+
+function triggerSubscribersForPath(mutatedPath: string): void {
+  const cleanMutated = mutatedPath.replace(/^\/+|\/+$/g, '');
+  for (const sub of registeredRefreshers) {
+    if (
+      cleanMutated === sub.path ||
+      cleanMutated.startsWith(`${sub.path}/`) ||
+      sub.path.startsWith(`${cleanMutated}/`)
+    ) {
+      sub.refresh();
+    }
+  }
+}
+
 /**
  * Subscribes live to a Firebase Realtime Database path using native SSE streaming
- * (EventSource) with resilient periodic fallback polling if SSE disconnects.
+ * (EventSource) up to MAX_CONCURRENT_SSE sockets, with resilient polling fallback
+ * so browser REST writes never starve on the per-origin connection limit.
  */
 export function subscribePath<T>(
   path: string,
@@ -177,7 +204,9 @@ export function subscribePath<T>(
   let closed = false;
   let state: unknown = null;
   let eventSource: EventSource | null = null;
+  let holdsSseSlot = false;
   let pollTimer: number | null = null;
+  const cleanPath = path.replace(/^\/+|\/+$/g, '');
 
   const fetchSnapshot = async () => {
     try {
@@ -192,11 +221,19 @@ export function subscribePath<T>(
     }
   };
 
+  const refresherEntry = {
+    path: cleanPath,
+    refresh: () => {
+      if (!closed) void fetchSnapshot();
+    },
+  };
+  registeredRefreshers.add(refresherEntry);
+
   const startFallbackPolling = () => {
     if (pollTimer !== null || closed) return;
     pollTimer = window.setInterval(() => {
       void fetchSnapshot();
-    }, 4500);
+    }, 3500);
   };
 
   const stopFallbackPolling = () => {
@@ -209,8 +246,14 @@ export function subscribePath<T>(
   // Immediate initial read so first paint is instant even before SSE handshake completes
   void fetchSnapshot();
 
-  if (typeof window !== 'undefined' && 'EventSource' in window) {
+  if (
+    typeof window !== 'undefined' &&
+    'EventSource' in window &&
+    activeEventSourceCount < MAX_CONCURRENT_SSE
+  ) {
     try {
+      activeEventSourceCount += 1;
+      holdsSseSlot = true;
       eventSource = new EventSource(buildUrl(path));
 
       const handleEvent = (mode: 'put' | 'patch') => (evt: MessageEvent) => {
@@ -233,6 +276,10 @@ export function subscribePath<T>(
         }
       };
     } catch {
+      if (holdsSseSlot) {
+        activeEventSourceCount = Math.max(0, activeEventSourceCount - 1);
+        holdsSseSlot = false;
+      }
       startFallbackPolling();
     }
   } else {
@@ -241,10 +288,15 @@ export function subscribePath<T>(
 
   return () => {
     closed = true;
+    registeredRefreshers.delete(refresherEntry);
     stopFallbackPolling();
     if (eventSource) {
       eventSource.close();
       eventSource = null;
+    }
+    if (holdsSseSlot) {
+      activeEventSourceCount = Math.max(0, activeEventSourceCount - 1);
+      holdsSseSlot = false;
     }
   };
 }
@@ -298,6 +350,17 @@ export async function ensureStoreSettingsSeeded(): Promise<StoreSettings> {
     if (typeof existing.codEnabled !== 'boolean') missingKeys.codEnabled = normalized.codEnabled;
     if (typeof existing.upiId !== 'string') missingKeys.upiId = normalized.upiId;
     if (typeof existing.upiName !== 'string') missingKeys.upiName = normalized.upiName;
+    if (typeof existing.minOrderAmount !== 'number') missingKeys.minOrderAmount = normalized.minOrderAmount;
+    if (typeof existing.bulkOrdersEnabled !== 'boolean') missingKeys.bulkOrdersEnabled = normalized.bulkOrdersEnabled;
+    if (typeof existing.supportMobile !== 'string' || !existing.supportMobile.trim()) missingKeys.supportMobile = normalized.supportMobile;
+    if (typeof existing.supportEmail !== 'string') missingKeys.supportEmail = normalized.supportEmail;
+    if (typeof existing.congratsPopupSeconds !== 'number') missingKeys.congratsPopupSeconds = normalized.congratsPopupSeconds;
+    if (typeof existing.promoBannerEnabled !== 'boolean') missingKeys.promoBannerEnabled = normalized.promoBannerEnabled;
+    if (typeof existing.promoBannerText !== 'string') missingKeys.promoBannerText = normalized.promoBannerText;
+    if (typeof existing.promoBannerButtonText !== 'string') missingKeys.promoBannerButtonText = normalized.promoBannerButtonText;
+    if (typeof existing.promoBannerActionUrl !== 'string') missingKeys.promoBannerActionUrl = normalized.promoBannerActionUrl;
+    if (typeof existing.promoBannerIntervalMinutes !== 'number') missingKeys.promoBannerIntervalMinutes = normalized.promoBannerIntervalMinutes;
+    if (typeof existing.promoBannerPhone !== 'string') missingKeys.promoBannerPhone = normalized.promoBannerPhone;
     if (Object.keys(missingKeys).length > 0) {
       await dbPatch('storeSettings', { ...missingKeys, updatedAt: Date.now() });
     }
@@ -429,6 +492,43 @@ export async function placeCustomerOrder(
     dbSet(`orders/${safeOrderId}`, sanitizedOrder),
     dbSet(`customers/${safeMobile}`, customerRecord),
   ]);
+}
+
+export async function submitBulkBookingRequest(
+  booking: BulkBookingRequest
+): Promise<void> {
+  const safeId = sanitizeFirebaseKey(booking.id);
+  if (!safeId) throw new Error('Invalid bulk booking ID.');
+  const payload: BulkBookingRequest = {
+    ...booking,
+    id: safeId,
+    customerName: sanitizeTextInput(booking.customerName, 80),
+    customerMobile: sanitizePhone10(booking.customerMobile),
+    address: sanitizeAddressInput(booking.address, 260),
+    notes: sanitizeAddressInput(booking.notes ?? '', 240),
+    status: 'pending',
+  };
+  await dbSet(`settings/bulkBookings/${safeId}`, payload);
+}
+
+export async function ownerUpdateBulkBookingStatus(
+  bookingId: string,
+  status: BulkBookingStatus
+): Promise<void> {
+  assertOwnerAuthenticated('updating bulk booking request status');
+  const safeId = sanitizeFirebaseKey(bookingId);
+  if (!safeId) throw new Error('Invalid bulk booking ID.');
+  await dbPatch(`settings/bulkBookings/${safeId}`, {
+    status,
+    updatedAt: Date.now(),
+  });
+}
+
+export async function ownerDeleteBulkBooking(bookingId: string): Promise<void> {
+  assertOwnerAuthenticated('deleting bulk booking request');
+  const safeId = sanitizeFirebaseKey(bookingId);
+  if (!safeId) throw new Error('Invalid bulk booking ID.');
+  await dbDelete(`settings/bulkBookings/${safeId}`);
 }
 
 /**

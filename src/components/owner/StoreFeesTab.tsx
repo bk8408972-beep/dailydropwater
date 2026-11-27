@@ -4,13 +4,22 @@ import {
   Building2,
   Check,
   CreditCard,
+  Headphones,
   IndianRupee,
   LocateFixed,
+  Mail,
   MapPin,
+  Megaphone,
+  Minus,
+  PartyPopper,
+  Phone,
+  Plus,
   Power,
   QrCode,
   Radar,
   Save,
+  ShoppingBag,
+  Sparkles,
   Store,
   Zap,
 } from 'lucide-react';
@@ -31,6 +40,21 @@ import {
   sanitizeTextInput,
   sanitizeUpiId,
 } from '../../utils/security';
+import {
+  DEFAULT_PROMO_BANNER_BUTTON_TEXT,
+  DEFAULT_PROMO_BANNER_INTERVAL_MINUTES,
+  MAX_CONGRATS_POPUP_SECONDS,
+  MAX_PROMO_BANNER_INTERVAL_MINUTES,
+  MIN_CONGRATS_POPUP_SECONDS,
+  MIN_ORDER_PRESETS,
+  MIN_PROMO_BANNER_INTERVAL_MINUTES,
+  PROMO_INTERVAL_PRESETS,
+  sanitizeCongratsPopupSeconds,
+  sanitizeMinOrderAmount,
+  sanitizePromoBannerIntervalMinutes,
+  validatePromoBannerDraft,
+  validateSupportContactDraft,
+} from '../../utils/customerFeatures';
 
 interface StoreFeesTabProps {
   settings: StoreSettings;
@@ -52,6 +76,28 @@ export function StoreFeesTab({
   const [storeLngInput, setStoreLngInput] = useState(String(settings.storeLng));
   const [upiIdInput, setUpiIdInput] = useState(settings.upiId);
   const [upiNameInput, setUpiNameInput] = useState(settings.upiName);
+  const [minOrderInput, setMinOrderInput] = useState(String(settings.minOrderAmount));
+  const [supportMobileInput, setSupportMobileInput] = useState(settings.supportMobile);
+  const [supportEmailInput, setSupportEmailInput] = useState(settings.supportEmail);
+  const [congratsSecondsInput, setCongratsSecondsInput] = useState(
+    String(settings.congratsPopupSeconds)
+  );
+  const [promoEnabledInput, setPromoEnabledInput] = useState(
+    Boolean(settings.promoBannerEnabled)
+  );
+  const [promoTextInput, setPromoTextInput] = useState(settings.promoBannerText);
+  const [promoButtonTextInput, setPromoButtonTextInput] = useState(
+    settings.promoBannerButtonText || DEFAULT_PROMO_BANNER_BUTTON_TEXT
+  );
+  const [promoActionUrlInput, setPromoActionUrlInput] = useState(
+    settings.promoBannerActionUrl ||
+      (settings.promoBannerPhone ? `tel:+91${settings.promoBannerPhone}` : '')
+  );
+  const [promoIntervalInput, setPromoIntervalInput] = useState(
+    String(
+      settings.promoBannerIntervalMinutes ?? DEFAULT_PROMO_BANNER_INTERVAL_MINUTES
+    )
+  );
   const [capturingStoreGps, setCapturingStoreGps] = useState(false);
   const [savingKey, setSavingKey] = useState<string | null>(null);
 
@@ -91,7 +137,127 @@ export function StoreFeesTab({
     setUpiNameInput(settings.upiName);
   }, [settings.upiName]);
 
+  useEffect(() => {
+    setMinOrderInput(String(settings.minOrderAmount));
+  }, [settings.minOrderAmount]);
+
+  useEffect(() => {
+    setSupportMobileInput(settings.supportMobile);
+  }, [settings.supportMobile]);
+
+  useEffect(() => {
+    setSupportEmailInput(settings.supportEmail);
+  }, [settings.supportEmail]);
+
+  useEffect(() => {
+    setCongratsSecondsInput(String(settings.congratsPopupSeconds));
+  }, [settings.congratsPopupSeconds]);
+
+  useEffect(() => {
+    setPromoEnabledInput(Boolean(settings.promoBannerEnabled));
+  }, [settings.promoBannerEnabled]);
+
+  useEffect(() => {
+    setPromoTextInput(settings.promoBannerText);
+  }, [settings.promoBannerText]);
+
+  useEffect(() => {
+    setPromoButtonTextInput(
+      settings.promoBannerButtonText || DEFAULT_PROMO_BANNER_BUTTON_TEXT
+    );
+  }, [settings.promoBannerButtonText]);
+
+  useEffect(() => {
+    setPromoActionUrlInput(
+      settings.promoBannerActionUrl ||
+        (settings.promoBannerPhone ? `tel:+91${settings.promoBannerPhone}` : '')
+    );
+  }, [settings.promoBannerActionUrl, settings.promoBannerPhone]);
+
+  useEffect(() => {
+    setPromoIntervalInput(
+      String(
+        settings.promoBannerIntervalMinutes ??
+          DEFAULT_PROMO_BANNER_INTERVAL_MINUTES
+      )
+    );
+  }, [settings.promoBannerIntervalMinutes]);
+
   const paymentAvailability = getAvailablePaymentOptions(settings);
+
+  const handleSavePromoBanner = async () => {
+    const validated = validatePromoBannerDraft({
+      promoBannerEnabled: promoEnabledInput,
+      promoBannerText: promoTextInput,
+      promoBannerButtonText: promoButtonTextInput,
+      promoBannerActionUrl: promoActionUrlInput,
+      promoBannerIntervalMinutes: promoIntervalInput,
+    });
+    if (!validated.ok) {
+      onNotify(validated.error);
+      return;
+    }
+    setPromoEnabledInput(validated.promoBannerEnabled);
+    setPromoTextInput(validated.promoBannerText);
+    setPromoButtonTextInput(validated.promoBannerButtonText);
+    setPromoActionUrlInput(validated.promoBannerActionUrl);
+    setPromoIntervalInput(String(validated.promoBannerIntervalMinutes));
+    setSavingKey('promoBanner');
+    try {
+      await updateStoreSettings({
+        promoBannerEnabled: validated.promoBannerEnabled,
+        promoBannerText: validated.promoBannerText,
+        promoBannerButtonText: validated.promoBannerButtonText,
+        promoBannerActionUrl: validated.promoBannerActionUrl,
+        promoBannerIntervalMinutes: validated.promoBannerIntervalMinutes,
+        promoBannerPhone: '',
+      });
+      onNotify(
+        validated.promoBannerEnabled
+          ? `Running Rider Ad Banner is ON (repeats every ${validated.promoBannerIntervalMinutes} min).`
+          : 'Running Rider Ad Banner saved as OFF (hidden in Customer App).'
+      );
+    } catch (err) {
+      onNotify(
+        err instanceof Error
+          ? err.message
+          : 'Could not save Running Rider Ad Banner settings.'
+      );
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const handleSaveSupportContact = async () => {
+    const validated = validateSupportContactDraft({
+      supportMobile: supportMobileInput,
+      supportEmail: supportEmailInput,
+    });
+    if (!validated.ok) {
+      onNotify(validated.error);
+      return;
+    }
+    setSupportMobileInput(validated.supportMobile);
+    setSupportEmailInput(validated.supportEmail);
+    setSavingKey('supportContact');
+    try {
+      await updateStoreSettings({
+        supportMobile: validated.supportMobile,
+        supportEmail: validated.supportEmail,
+      });
+      onNotify(
+        validated.supportEmail
+          ? `Support Contact saved (Mobile: ${validated.supportMobile}, Email: ${validated.supportEmail}).`
+          : `Support Mobile saved as ${validated.supportMobile}.`
+      );
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Could not save Support Contact settings.'
+      );
+    } finally {
+      setSavingKey(null);
+    }
+  };
 
   const handleSavePaymentDetails = async () => {
     const cleanUpiId = sanitizeUpiId(upiIdInput);
@@ -345,6 +511,497 @@ export function StoreFeesTab({
                   : 'Turn Auto-Assign ON'}
             </span>
           </button>
+        </div>
+      </div>
+
+      {/* Row 1.1: Minimum Order Amount, Function Bulk Orders Toggle, and Support Contact Settings */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Minimum Order Amount (₹) Control */}
+        <div
+          data-testid="owner-min-order-card"
+          className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h2 className="font-display text-lg font-bold text-slate-900 flex items-center gap-2">
+                <ShoppingBag className="w-5 h-5 text-blue-700 shrink-0" aria-hidden="true" />
+                <span>Minimum Order Amount (₹)</span>
+              </h2>
+              <p className="text-xs text-slate-600 mt-1">
+                Customers must reach this combined cart total across water cans &amp; cold
+                drinks before Place Order is enabled (default ₹100).
+              </p>
+            </div>
+            <span className="text-xs font-extrabold text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg tabular-nums shrink-0">
+              Saved: ₹{settings.minOrderAmount}
+            </span>
+          </div>
+
+          <div
+            className="flex flex-wrap gap-1.5"
+            role="group"
+            aria-label="Minimum order amount presets"
+          >
+            {MIN_ORDER_PRESETS.map((preset) => {
+              const selected = Number(minOrderInput) === preset;
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setMinOrderInput(String(preset))}
+                  className={`min-h-[36px] px-3 rounded-lg text-xs font-bold tabular-nums cursor-pointer transition-colors ${
+                    selected
+                      ? 'bg-blue-700 text-white'
+                      : 'bg-slate-50 border border-slate-300 text-slate-700 hover:bg-blue-50'
+                  }`}
+                >
+                  ₹{preset}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex gap-2">
+            <label htmlFor="owner-min-order-input" className="sr-only">
+              Minimum Order Amount in Rupees
+            </label>
+            <input
+              id="owner-min-order-input"
+              data-testid="owner-min-order-input"
+              type="number"
+              min={0}
+              max={50000}
+              step={1}
+              value={minOrderInput}
+              onChange={(e) => setMinOrderInput(e.target.value)}
+              className="flex-1 min-h-[44px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-semibold text-slate-900 tabular-nums focus:outline-none focus:border-blue-700"
+            />
+            <button
+              type="button"
+              disabled={savingKey === 'minOrderAmount'}
+              data-testid="save-min-order-btn"
+              onClick={() => {
+                const clean = sanitizeMinOrderAmount(
+                  minOrderInput,
+                  settings.minOrderAmount
+                );
+                setMinOrderInput(String(clean));
+                void saveSetting(
+                  'minOrderAmount',
+                  clean,
+                  `Minimum Order Amount saved as ₹${clean}.`
+                );
+              }}
+              className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-60 shrink-0"
+            >
+              <Save className="w-4 h-4" aria-hidden="true" />
+              <span>{savingKey === 'minOrderAmount' ? 'Saving…' : 'Save'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Events / Function Bulk Orders ON/OFF Toggle */}
+        <div
+          data-testid="owner-bulk-orders-card"
+          className={`rounded-2xl border p-5 flex flex-col justify-between gap-4 ${
+            settings.bulkOrdersEnabled
+              ? 'bg-cyan-50/70 border-cyan-300'
+              : 'bg-white border-slate-200'
+          }`}
+        >
+          <div>
+            <div className="flex items-center gap-2">
+              <Sparkles
+                className={`w-5 h-5 shrink-0 ${
+                  settings.bulkOrdersEnabled ? 'text-cyan-800' : 'text-slate-500'
+                }`}
+                aria-hidden="true"
+              />
+              <h2 className="font-display text-lg font-bold text-slate-900">
+                Function / Events Bulk Orders
+              </h2>
+            </div>
+            <p
+              className={`text-sm font-bold mt-1 ${
+                settings.bulkOrdersEnabled ? 'text-cyan-900' : 'text-slate-600'
+              }`}
+            >
+              {settings.bulkOrdersEnabled
+                ? 'Function Bulk Orders: ON (Visible to Customers)'
+                : 'Function Bulk Orders: OFF (Hidden in Customer App)'}
+            </p>
+            <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+              When ON, customers can tap &ldquo;Events / Function Bulk Order&rdquo; to book
+              10, 20, 50 or custom water cans for functions and send requests directly
+              to your Live Orders tab.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            disabled={savingKey === 'bulkOrdersEnabled'}
+            data-testid="owner-bulk-orders-toggle"
+            onClick={() =>
+              void saveSetting(
+                'bulkOrdersEnabled',
+                !settings.bulkOrdersEnabled,
+                !settings.bulkOrdersEnabled
+                  ? 'Function Bulk Orders switched ON in Customer App.'
+                  : 'Function Bulk Orders switched OFF and hidden in Customer App.'
+              )
+            }
+            className={`w-full min-h-[48px] px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-colors disabled:opacity-60 ${
+              settings.bulkOrdersEnabled
+                ? 'bg-cyan-700 hover:bg-cyan-800 text-white'
+                : 'bg-slate-800 hover:bg-slate-900 text-white'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span>
+              {savingKey === 'bulkOrdersEnabled'
+                ? 'Updating…'
+                : settings.bulkOrdersEnabled
+                  ? 'Function Bulk Orders: ON (Tap to Turn OFF)'
+                  : 'Function Bulk Orders: OFF (Tap to Turn ON)'}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* Row 1.15: Support Contact Settings (Owner Only — Syncs to Customer & Rider Apps) */}
+      <div
+        data-testid="owner-support-contact-card"
+        className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-4"
+      >
+        <div>
+          <h2 className="font-display text-xl font-bold text-slate-900 flex items-center gap-2">
+            <Headphones className="w-5 h-5 text-blue-700 shrink-0" aria-hidden="true" />
+            <span>Support Contact Settings</span>
+          </h2>
+          <p className="text-xs text-slate-600 mt-1">
+            Automatically updates the Support Section, Call Owner buttons, and Events
+            Bulk Order helpline across both Customer App and Rider App.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+          <div>
+            <label
+              htmlFor="owner-support-mobile-input"
+              className="block text-xs font-bold text-slate-800 mb-1 flex items-center gap-1"
+            >
+              <Phone className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+              <span>Support Mobile Number (10 Digits)</span>
+            </label>
+            <input
+              id="owner-support-mobile-input"
+              data-testid="owner-support-mobile-input"
+              type="tel"
+              inputMode="numeric"
+              maxLength={10}
+              value={supportMobileInput}
+              onChange={(e) =>
+                setSupportMobileInput(e.target.value.replace(/\D/g, '').slice(0, 10))
+              }
+              placeholder="9885138592"
+              className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-semibold tabular-nums text-slate-900 focus:outline-none focus:border-blue-700"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="owner-support-email-input"
+              className="block text-xs font-bold text-slate-800 mb-1 flex items-center gap-1"
+            >
+              <Mail className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+              <span>Support Email ID</span>
+            </label>
+            <input
+              id="owner-support-email-input"
+              data-testid="owner-support-email-input"
+              type="email"
+              value={supportEmailInput}
+              onChange={(e) => setSupportEmailInput(e.target.value)}
+              placeholder="support@dailydropwater.com"
+              className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-semibold text-slate-900 focus:outline-none focus:border-blue-700"
+            />
+          </div>
+
+          <button
+            type="button"
+            disabled={savingKey === 'supportContact'}
+            data-testid="save-support-contact-btn"
+            onClick={() => void handleSaveSupportContact()}
+            className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-sm flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+          >
+            <Save className="w-4 h-4" aria-hidden="true" />
+            <span>
+              {savingKey === 'supportContact' ? 'Saving…' : 'Save Support Contact'}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* Row 1.18: Owner-Controlled Congratulations Popup Seconds & Running Rider Ad Banner */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Congratulations Popup Seconds */}
+        <div
+          data-testid="owner-congrats-timer-card"
+          className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4 flex flex-col justify-between"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h2 className="font-display text-lg font-bold text-slate-900 flex items-center gap-2">
+                <PartyPopper className="w-5 h-5 text-emerald-600 shrink-0" aria-hidden="true" />
+                <span>Congratulations Popup Seconds</span>
+              </h2>
+              <p className="text-xs text-slate-600 mt-1">
+                Controls how long the full-screen discount celebration popup stays visible
+                (1–10 seconds, default 4s) before opening My Orders.
+              </p>
+            </div>
+            <span
+              data-testid="owner-congrats-timer-saved-badge"
+              className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-extrabold tabular-nums shrink-0"
+            >
+              Saved: {settings.congratsPopupSeconds}s
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="congrats-timer-minus-btn"
+              aria-label="Decrease Congratulations popup duration"
+              onClick={() => {
+                const current = sanitizeCongratsPopupSeconds(
+                  congratsSecondsInput,
+                  settings.congratsPopupSeconds
+                );
+                setCongratsSecondsInput(
+                  String(Math.max(MIN_CONGRATS_POPUP_SECONDS, current - 1))
+                );
+              }}
+              className="w-11 h-11 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 flex items-center justify-center cursor-pointer shrink-0"
+            >
+              <Minus className="w-4 h-4" aria-hidden="true" />
+            </button>
+
+            <label htmlFor="owner-congrats-timer-input" className="sr-only">
+              Congratulations Popup Seconds
+            </label>
+            <input
+              id="owner-congrats-timer-input"
+              data-testid="owner-congrats-timer-input"
+              type="number"
+              min={MIN_CONGRATS_POPUP_SECONDS}
+              max={MAX_CONGRATS_POPUP_SECONDS}
+              step={1}
+              value={congratsSecondsInput}
+              onChange={(e) => setCongratsSecondsInput(e.target.value)}
+              className="w-24 min-h-[44px] px-3 rounded-xl border border-slate-300 bg-white text-center text-base font-extrabold text-slate-900 tabular-nums focus:outline-none focus:border-blue-700"
+            />
+
+            <button
+              type="button"
+              data-testid="congrats-timer-plus-btn"
+              aria-label="Increase Congratulations popup duration"
+              onClick={() => {
+                const current = sanitizeCongratsPopupSeconds(
+                  congratsSecondsInput,
+                  settings.congratsPopupSeconds
+                );
+                setCongratsSecondsInput(
+                  String(Math.min(MAX_CONGRATS_POPUP_SECONDS, current + 1))
+                );
+              }}
+              className="w-11 h-11 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 flex items-center justify-center cursor-pointer shrink-0"
+            >
+              <Plus className="w-4 h-4" aria-hidden="true" />
+            </button>
+
+            <span className="text-xs font-semibold text-slate-500 mr-auto">
+              sec (1–10)
+            </span>
+
+            <button
+              type="button"
+              disabled={savingKey === 'congratsPopupSeconds'}
+              data-testid="save-congrats-timer-btn"
+              onClick={() => {
+                const clean = sanitizeCongratsPopupSeconds(
+                  congratsSecondsInput,
+                  settings.congratsPopupSeconds
+                );
+                setCongratsSecondsInput(String(clean));
+                void saveSetting(
+                  'congratsPopupSeconds',
+                  clean,
+                  `Congratulations Popup Seconds saved as ${clean}s.`
+                );
+              }}
+              className="min-h-[44px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-60 shrink-0"
+            >
+              <Save className="w-4 h-4" aria-hidden="true" />
+              <span>{savingKey === 'congratsPopupSeconds' ? 'Saving…' : 'Save'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Running Rider Ad Banner Settings */}
+        <div
+          data-testid="owner-promo-banner-card"
+          className={`rounded-2xl border p-5 space-y-3.5 transition-colors ${
+            promoEnabledInput
+              ? 'bg-sky-50/70 border-blue-300'
+              : 'bg-white border-slate-200'
+          }`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h2 className="font-display text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Megaphone className="w-5 h-5 text-blue-700 shrink-0" aria-hidden="true" />
+                <span>Running Rider Ad Banner</span>
+              </h2>
+              <p className="text-xs text-slate-600 mt-1">
+                Slim ~70px strip at the top of Customer App where an animated scooter
+                rider pulls your offer banner &amp; button every saved interval.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={promoEnabledInput}
+              data-testid="owner-promo-banner-toggle"
+              onClick={() => setPromoEnabledInput((prev) => !prev)}
+              className={`min-h-[36px] px-3 rounded-xl text-xs font-extrabold flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors ${
+                promoEnabledInput
+                  ? 'bg-blue-700 hover:bg-blue-800 text-white'
+                  : 'bg-slate-200 hover:bg-slate-300 text-slate-800'
+              }`}
+            >
+              <Power className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{promoEnabledInput ? 'ON' : 'OFF'}</span>
+            </button>
+          </div>
+
+          <div className="space-y-2.5">
+            <div>
+              <label
+                htmlFor="owner-promo-banner-text-input"
+                className="block text-xs font-bold text-slate-800 mb-1"
+              >
+                Offer Text
+              </label>
+              <input
+                id="owner-promo-banner-text-input"
+                data-testid="owner-promo-banner-text-input"
+                type="text"
+                maxLength={160}
+                value={promoTextInput}
+                onChange={(e) => setPromoTextInput(e.target.value)}
+                placeholder="e.g. Summer Offer: Flat ₹20 OFF on 20L Water Cans!"
+                className="w-full min-h-[42px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-medium text-slate-900 focus:outline-none focus:border-blue-700"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label
+                  htmlFor="owner-promo-banner-btn-text-input"
+                  className="block text-xs font-bold text-slate-800 mb-1"
+                >
+                  Button Text
+                </label>
+                <input
+                  id="owner-promo-banner-btn-text-input"
+                  data-testid="owner-promo-banner-btn-text-input"
+                  type="text"
+                  maxLength={28}
+                  value={promoButtonTextInput}
+                  onChange={(e) => setPromoButtonTextInput(e.target.value)}
+                  placeholder="Order Now"
+                  className="w-full min-h-[42px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-semibold text-slate-900 focus:outline-none focus:border-blue-700"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="owner-promo-banner-url-input"
+                  className="block text-xs font-bold text-slate-800 mb-1"
+                >
+                  Optional Action URL
+                </label>
+                <input
+                  id="owner-promo-banner-url-input"
+                  data-testid="owner-promo-banner-url-input"
+                  type="text"
+                  maxLength={300}
+                  value={promoActionUrlInput}
+                  onChange={(e) => setPromoActionUrlInput(e.target.value)}
+                  placeholder="https://wa.me/91... or leave blank"
+                  className="w-full min-h-[42px] px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-medium text-slate-900 focus:outline-none focus:border-blue-700"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2.5 pt-0.5">
+              <div className="flex-1">
+                <label
+                  htmlFor="owner-promo-banner-interval-input"
+                  className="block text-xs font-bold text-slate-800 mb-1"
+                >
+                  Repeat Interval (Minutes, default 1 min)
+                </label>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {PROMO_INTERVAL_PRESETS.map((mins) => {
+                    const selected =
+                      sanitizePromoBannerIntervalMinutes(
+                        promoIntervalInput,
+                        DEFAULT_PROMO_BANNER_INTERVAL_MINUTES
+                      ) === mins;
+                    return (
+                      <button
+                        key={mins}
+                        type="button"
+                        onClick={() => setPromoIntervalInput(String(mins))}
+                        className={`min-h-[38px] px-2.5 rounded-lg text-xs font-bold tabular-nums cursor-pointer transition-colors ${
+                          selected
+                            ? 'bg-blue-700 text-white'
+                            : 'bg-slate-50 border border-slate-300 text-slate-700 hover:bg-blue-50'
+                        }`}
+                      >
+                        {mins}m
+                      </button>
+                    );
+                  })}
+                  <input
+                    id="owner-promo-banner-interval-input"
+                    data-testid="owner-promo-banner-interval-input"
+                    type="number"
+                    min={MIN_PROMO_BANNER_INTERVAL_MINUTES}
+                    max={MAX_PROMO_BANNER_INTERVAL_MINUTES}
+                    step={1}
+                    value={promoIntervalInput}
+                    onChange={(e) => setPromoIntervalInput(e.target.value)}
+                    className="w-16 min-h-[38px] px-2 rounded-lg border border-slate-300 bg-white text-center text-xs font-extrabold text-slate-900 tabular-nums focus:outline-none focus:border-blue-700"
+                  />
+                  <span className="text-xs font-semibold text-slate-500">min</span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={savingKey === 'promoBanner'}
+                data-testid="save-promo-banner-btn"
+                onClick={() => void handleSavePromoBanner()}
+                className="min-h-[42px] px-4 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60 shrink-0"
+              >
+                <Save className="w-4 h-4" aria-hidden="true" />
+                <span>{savingKey === 'promoBanner' ? 'Saving…' : 'Save Banner'}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

@@ -79,6 +79,7 @@ test('validateAndBuildCanonicalOrder recalculates totals authoritatively and rej
     deliveryRadiusKm: 3,
     storeLat: 17.3984,
     storeLng: 78.4136,
+    minOrderAmount: 0,
   };
 
   // Tampered expectedClientTotal (trying to pay ₹1 instead of ₹85) is rejected
@@ -134,6 +135,7 @@ test('validateAndBuildCanonicalOrder strictly enforces 12-digit UTR on UPI order
     codEnabled: true,
     upiId: 'dailydrop@ybl',
     radiusEnabled: false,
+    minOrderAmount: 0,
   };
 
   const badUtr = validateAndBuildCanonicalOrder({
@@ -194,7 +196,7 @@ test('validateOrderWritePayload catches tampered totalAmount mismatch', () => {
   const valid = validateAndBuildCanonicalOrder({
     cart: { local_20l: 2 },
     catalog: SAMPLE_CATALOG,
-    storeSettings: { ...DEFAULT_STORE_SETTINGS, radiusEnabled: false },
+    storeSettings: { ...DEFAULT_STORE_SETTINGS, radiusEnabled: false, minOrderAmount: 0 },
     customerName: 'Azeem',
     customerMobile: '9848012345',
     address: 'Flat 101, Sunrise Residency',
@@ -208,5 +210,28 @@ test('validateOrderWritePayload catches tampered totalAmount mismatch', () => {
   if (valid.ok) {
     const forged = { ...valid.order, totalAmount: 10 };
     assert.ok(validateOrderWritePayload(forged));
+  }
+});
+
+test('validateAndBuildCanonicalOrder enforces Owner Minimum Order Amount with exact guidance message', () => {
+  const belowMin = validateAndBuildCanonicalOrder({
+    cart: { local_20l: 2 }, // ₹60 < ₹100 default
+    catalog: SAMPLE_CATALOG,
+    storeSettings: { ...DEFAULT_STORE_SETTINGS, radiusEnabled: false, minOrderAmount: 100 },
+    customerName: 'Azeem',
+    customerMobile: '9848012345',
+    address: 'Flat 101, Sunrise Residency',
+    customerLocation: null,
+    floorLevel: 'ground_1st',
+    hasLift: true,
+    serviceMode: 'fast',
+    paymentMethod: 'Cash on Delivery',
+  });
+  assert.equal(belowMin.ok, false);
+  if (!belowMin.ok) {
+    assert.equal(
+      belowMin.error,
+      'Minimum order ₹100 ka hona zaroori hai — ₹40 ka item aur add karein'
+    );
   }
 });
