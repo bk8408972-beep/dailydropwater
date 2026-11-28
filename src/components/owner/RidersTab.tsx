@@ -36,6 +36,7 @@ import {
 import { computeRiderStats, getRiderCompletedOrders } from '../../utils/riderStats';
 import { getOrderPaymentBadge } from '../../utils/payment';
 import { formatFloorLiftSummary } from '../../utils/storeSettings';
+import { formatOrderIdLabel } from '../../utils/orderSequence';
 import { LiveFleetMap } from './LiveFleetMap';
 
 interface RidersTabProps {
@@ -618,10 +619,16 @@ export function RidersTab({ riders, orders, onNotify }: RidersTabProps) {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <p className="text-xs text-slate-500 font-semibold tabular-nums">
-                            {ord.id} · {formatTimestamp(ord.createdAt)}
+                          <p className="text-xs text-slate-500 font-semibold tabular-nums flex flex-wrap items-center gap-1.5">
+                            <span
+                              data-testid={`owner-history-order-id-${ord.id}`}
+                              className="inline-flex items-center px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-900 font-display font-extrabold text-xs"
+                            >
+                              {formatOrderIdLabel(ord)}
+                            </span>
+                            <span>· {formatTimestamp(ord.createdAt)}</span>
                           </p>
-                          <p className="text-sm font-bold text-slate-900 truncate">
+                          <p className="text-sm font-bold text-slate-900 truncate mt-1">
                             {ord.customerName} · {getStatusLabel(ord.status)}
                           </p>
                         </div>

@@ -62,6 +62,7 @@ export function buildWeeklyArchiveRecord(
 
     return {
       orderId: order.id,
+      orderNumber: order.orderNumber ?? null,
       createdAt: order.createdAt,
       deliveredAt: order.deliveredAt ?? null,
       status,

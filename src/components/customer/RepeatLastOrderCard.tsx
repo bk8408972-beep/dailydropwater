@@ -1,6 +1,7 @@
 import { RotateCcw, ShoppingBag } from 'lucide-react';
 import type { Order } from '../../types';
 import { formatTimestamp } from '../../utils/domain';
+import { formatOrderIdLabel } from '../../utils/orderSequence';
 
 interface RepeatLastOrderCardProps {
   lastOrder: Order;
@@ -33,8 +34,8 @@ export function RepeatLastOrderCard({
               <h2 className="font-display text-base sm:text-lg font-extrabold text-slate-900">
                 Repeat Last Order
               </h2>
-              <span className="text-[11px] font-bold text-blue-800 bg-blue-100 px-2 py-0.5 rounded-md">
-                {lastOrder.id} · {formatTimestamp(lastOrder.createdAt)}
+              <span className="text-[11px] font-bold text-blue-800 bg-blue-100 px-2 py-0.5 rounded-md tabular-nums">
+                {formatOrderIdLabel(lastOrder)} · {formatTimestamp(lastOrder.createdAt)}
               </span>
             </div>
             <p

@@ -35,6 +35,7 @@ import {
   isOrderTimedOutUnassigned,
   shouldAutoUnassignOrder,
 } from '../../utils/orderTimer';
+import { formatOrderIdLabel } from '../../utils/orderSequence';
 import {
   buildPhoneCallUrl,
   copyPhoneNumber,
@@ -123,7 +124,7 @@ export function LiveOrdersTab({
       })
         .then(() => {
           onNotify(
-            `Rider ${order.assignedRiderName || order.assignedRiderId || ''} did not accept ${order.id} within 3 minutes. Please Re-Assign to Another Rider.`
+            `Rider ${order.assignedRiderName || order.assignedRiderId || ''} did not accept ${formatOrderIdLabel(order)} within 3 minutes. Please Re-Assign to Another Rider.`
           );
         })
         .catch(() => {
@@ -160,6 +161,7 @@ export function LiveOrdersTab({
     riderId: string,
     isReassign: boolean = false
   ) => {
+    const orderLabel = formatOrderIdLabel(order);
     if (!riderId) {
       await updateOrder(
         order.id,
@@ -171,7 +173,7 @@ export function LiveOrdersTab({
           assignedRiderMobile: null,
           assignedAt: null,
         },
-        `Unassigned rider from ${order.id}.`
+        `Unassigned rider from ${orderLabel}.`
       );
       return;
     }
@@ -203,8 +205,8 @@ export function LiveOrdersTab({
         timedOutAt: null,
       },
       isReassign
-        ? `Re-assigned ${order.id} to ${chosen.name} (${chosen.id}). 3-minute acceptance timer reset and new rider alerted.`
-        : `Assigned ${chosen.name} (${chosen.id}) to ${order.id}. 3-minute acceptance timer started.`
+        ? `Re-assigned ${orderLabel} to ${chosen.name} (${chosen.id}). 3-minute acceptance timer reset and new rider alerted.`
+        : `Assigned ${chosen.name} (${chosen.id}) to ${orderLabel}. 3-minute acceptance timer started.`
     );
 
     setReassignDraftByOrder((prev) => {
@@ -336,13 +338,21 @@ export function LiveOrdersTab({
                 <div>
                   <div className="flex items-start justify-between gap-2 pb-3 border-b border-slate-100">
                     <div>
-                      <div className="text-xs font-semibold text-slate-500 tabular-nums">
-                        {order.id} · {formatTimestamp(order.createdAt)} ·{' '}
-                        {order.serviceMode === 'events'
-                          ? 'Events Supply'
-                          : 'Fast 15–20m'}
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs font-semibold text-slate-500 tabular-nums">
+                        <span
+                          data-testid={`owner-order-id-${order.id}`}
+                          className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-900 font-display font-extrabold text-xs sm:text-sm"
+                        >
+                          {formatOrderIdLabel(order)}
+                        </span>
+                        <span>
+                          · {formatTimestamp(order.createdAt)} ·{' '}
+                          {order.serviceMode === 'events'
+                            ? 'Events Supply'
+                            : 'Fast 15–20m'}
+                        </span>
                       </div>
-                      <h3 className="font-display text-lg font-bold text-slate-900 mt-0.5">
+                      <h3 className="font-display text-lg font-bold text-slate-900 mt-1">
                         {order.customerName}
                       </h3>
                       <p

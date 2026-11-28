@@ -116,8 +116,16 @@ export interface RiderLiveLocation extends GeoPoint {
   updatedAt: number;
 }
 
+export interface DailyOrderCounterState {
+  date: string; // YYYY-MM-DD in IST (UTC+5:30)
+  count: number;
+  updatedAt: number;
+}
+
 export interface Order {
   id: string;
+  orderNumber?: number | null;
+  orderDateIst?: string | null;
   customerName: string;
   customerMobile: string;
   address: string;
@@ -198,6 +206,7 @@ export interface CustomerProfile {
 
 export interface ArchivedTransactionSummary {
   orderId: string;
+  orderNumber?: number | null;
   createdAt: number;
   deliveredAt?: number | null;
   status: string;

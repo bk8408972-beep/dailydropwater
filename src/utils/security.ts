@@ -134,6 +134,11 @@ export interface CanonicalOrderBuildParams {
   riders?: RiderRecord[];
   existingOrders?: Order[];
   nowMs?: number;
+  dailySequence?: {
+    orderNumber: number;
+    orderDateIst: string;
+    orderKey: string;
+  };
 }
 
 export type CanonicalOrderResult =
@@ -390,10 +395,12 @@ export function validateAndBuildCanonicalOrder(
   }
 
   const now = params.nowMs ?? Date.now();
-  const orderId = createOrderId(now);
+  const orderId = params.dailySequence?.orderKey || createOrderId(now);
 
   const order: Order = {
     id: orderId,
+    orderNumber: params.dailySequence?.orderNumber ?? null,
+    orderDateIst: params.dailySequence?.orderDateIst ?? null,
     customerName: cleanName,
     customerMobile: cleanMobile,
     address: cleanAddress,
@@ -442,6 +449,13 @@ export function validateOrderWritePayload(order: Order): string | null {
   }
   if (!order.id || !/^DD-[A-Za-z0-9_-]{4,24}$/.test(order.id)) {
     return 'Invalid order ID format.';
+  }
+  if (
+    order.orderNumber !== undefined &&
+    order.orderNumber !== null &&
+    (!Number.isInteger(order.orderNumber) || order.orderNumber <= 0)
+  ) {
+    return 'Invalid daily order number.';
   }
   if (!order.customerName || order.customerName.trim().length < 2) {
     return 'Customer name is required.';

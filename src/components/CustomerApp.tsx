@@ -42,6 +42,7 @@ import type {
   StoreSettings,
 } from '../types';
 import {
+  allocateNextDailyOrderNumber,
   dbGet,
   deleteCustomerProfileData,
   ensureProductsSeeded,
@@ -99,6 +100,11 @@ import {
   isValidUtr,
   sanitizeUtrInput,
 } from '../utils/payment';
+import {
+  formatOrderIdLabel,
+  isValidOrderLookupQuery,
+  matchesOrderLookupQuery,
+} from '../utils/orderSequence';
 import {
   clearCustomerProfile,
   hasAcceptedGpsDisclosure,
@@ -221,6 +227,13 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
   const [activeMenuPage, setActiveMenuPage] = useState<CustomerMenuPage | null>(null);
   const menuContainerRef = useRef<HTMLDivElement | null>(null);
   const [celebrationSavings, setCelebrationSavings] = useState<number | null>(null);
+  const [celebrationOrderLabel, setCelebrationOrderLabel] = useState<string | null>(null);
+  const [placedOrderPopup, setPlacedOrderPopup] = useState<{
+    orderLabel: string;
+    totalAmount: number;
+    paySummary: string;
+    riderSummary: string | null;
+  } | null>(null);
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
 
   // Checkout drawer state
@@ -318,6 +331,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
       gpsDisclosureOpen ||
         outsideRadiusModal ||
         bulkModalOpen ||
+        placedOrderPopup ||
         zoomPhoto ||
         checkoutOpen ||
         menuDropdownOpen
@@ -329,6 +343,9 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         setOutsideRadiusModal(null);
       } else if (bulkModalOpen) {
         setBulkModalOpen(false);
+      } else if (placedOrderPopup) {
+        setPlacedOrderPopup(null);
+        setActiveTab('orders');
       } else if (zoomPhoto) {
         setZoomPhoto(null);
       } else if (menuDropdownOpen) {
@@ -488,25 +505,12 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
 
   const normalizedTrackQuery = trackMobile.trim();
   const trackQueryDigits = normalizedTrackQuery.replace(/\D/g, '');
-  const isTrackQueryValid =
-    (/^\d{10}$/.test(normalizedTrackQuery) ||
-      (trackQueryDigits.length === 10 && !/[a-zA-Z]/.test(normalizedTrackQuery))) ||
-    normalizedTrackQuery.length >= 4;
+  const isTrackQueryValid = isValidOrderLookupQuery(normalizedTrackQuery);
 
   const myOrders = useMemo(() => {
     const trimmed = trackMobile.trim();
     if (!trimmed) return [];
-    const digitsOnly = trimmed.replace(/\D/g, '');
-    if (digitsOnly.length === 10 && !/[a-zA-Z]/.test(trimmed)) {
-      return allOrders.filter(
-        (ord) => ord.customerMobile.replace(/\D/g, '') === digitsOnly
-      );
-    }
-    if (trimmed.length >= 4) {
-      const upper = trimmed.toUpperCase();
-      return allOrders.filter((ord) => ord.id.toUpperCase().includes(upper));
-    }
-    return [];
+    return allOrders.filter((ord) => matchesOrderLookupQuery(ord, trimmed));
   }, [allOrders, trackMobile]);
 
   const customerHistoryOrders = useMemo(() => {
@@ -971,7 +975,17 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         return;
       }
 
-      const { order: newOrder, autoAssignedRider } = canonical;
+      const { order: validatedOrder, autoAssignedRider } = canonical;
+
+      // Atomically allocate the next sequential daily Order ID (1, 2, 3...) in Firebase (resets 12:00 AM IST)
+      const dailySeq = await allocateNextDailyOrderNumber(validatedOrder.createdAt);
+      const newOrder: Order = {
+        ...validatedOrder,
+        id: dailySeq.orderKey,
+        orderNumber: dailySeq.orderNumber,
+        orderDateIst: dailySeq.orderDateIst,
+      };
+      const orderIdLabel = formatOrderIdLabel(newOrder);
 
       await placeCustomerOrder(newOrder, existingCustomer, authoritativeCatalog);
 
@@ -1003,15 +1017,24 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         newOrder.paymentMethod === 'UPI'
           ? `UPI PAYMENT PENDING (UTR: ${newOrder.upiUtr})`
           : COD_DISPLAY_LABEL;
+      const riderSummary = autoAssignedRider
+        ? `${autoAssignedRider.name} (${autoAssignedRider.id})`
+        : null;
       setOrderBanner(
-        autoAssignedRider
-          ? `Order ${newOrder.id} placed & assigned to ${autoAssignedRider.name} (${autoAssignedRider.id})! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
-          : `Order ${newOrder.id} placed! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
+        riderSummary
+          ? `${orderIdLabel} placed & assigned to ${riderSummary}! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
+          : `${orderIdLabel} placed! ${paySummary} · Total ${formatRupees(newOrder.totalAmount)}.`
       );
       if (orderSavings > 0) {
+        setCelebrationOrderLabel(orderIdLabel);
         setCelebrationSavings(orderSavings);
       } else {
-        setActiveTab('orders');
+        setPlacedOrderPopup({
+          orderLabel: orderIdLabel,
+          totalAmount: newOrder.totalAmount,
+          paySummary,
+          riderSummary,
+        });
       }
     } catch (err) {
       setFormErrors({
@@ -1725,7 +1748,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                 Live Order Tracking
               </h2>
               <p className="text-sm text-slate-600 mb-4">
-                Enter your 10-digit mobile number or Order ID (e.g. DD-...) to follow
+                Enter your 10-digit mobile number or Order ID (e.g. 1, 2, 3) to follow
                 live delivery status and contact your assigned delivery rider.
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
@@ -1737,7 +1760,7 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                   type="text"
                   value={trackMobile}
                   onChange={(e) => setTrackMobile(e.target.value.slice(0, 32))}
-                  placeholder="Enter 10-digit phone number or Order ID (DD-...)"
+                  placeholder="Enter 10-digit phone number or Order ID (e.g. 1, 2, 3)"
                   className="flex-1 min-h-[46px] px-4 rounded-xl border border-slate-300 text-base text-slate-900 tabular-nums focus:outline-none focus:border-blue-700"
                 />
                 <button
@@ -1863,14 +1886,21 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
                     >
                       <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100">
                         <div className="min-w-0">
-                          <div className="text-xs text-slate-500 font-medium tabular-nums">
-                            Order ID: <strong className="text-slate-700">{order.id}</strong> ·{' '}
-                            {formatTimestamp(order.createdAt)} ·{' '}
-                            {order.serviceMode === 'events'
-                              ? 'Events Supply'
-                              : 'Fast Delivery'}
+                          <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 font-medium tabular-nums">
+                            <span
+                              data-testid={`customer-order-id-${order.id}`}
+                              className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-900 font-display font-extrabold text-xs sm:text-sm"
+                            >
+                              {formatOrderIdLabel(order)}
+                            </span>
+                            <span>
+                              · {formatTimestamp(order.createdAt)} ·{' '}
+                              {order.serviceMode === 'events'
+                                ? 'Events Supply'
+                                : 'Fast Delivery'}
+                            </span>
                           </div>
-                          <h3 className="font-display text-lg font-bold text-slate-900 mt-0.5">
+                          <h3 className="font-display text-lg font-bold text-slate-900 mt-1">
                             {getStatusLabel(order.status)}
                           </h3>
                         </div>
@@ -3125,11 +3155,65 @@ export function CustomerApp({ onOpenPrivacy }: CustomerAppProps) {
         }}
       />
 
+      {placedOrderPopup && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Order Placed Successfully"
+          data-testid="order-placed-popup"
+          className="fixed inset-0 z-[95] bg-slate-950/65 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-200 p-6 text-center space-y-4">
+            <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+              <CheckCircle2 className="w-8 h-8" aria-hidden="true" />
+            </div>
+            <div>
+              <p className="text-xs font-extrabold uppercase tracking-wider text-emerald-700">
+                Order Confirmed
+              </p>
+              <h2 className="font-display text-2xl font-extrabold text-slate-900 mt-1">
+                Order Placed!
+              </h2>
+              <div
+                data-testid="order-placed-popup-id"
+                className="inline-flex items-center justify-center mt-3 px-4 py-1.5 rounded-xl bg-blue-700 text-white font-display font-extrabold text-lg tracking-tight tabular-nums shadow-xs"
+              >
+                {placedOrderPopup.orderLabel}
+              </div>
+            </div>
+            <div className="rounded-2xl bg-slate-50 border border-slate-200 px-4 py-3 text-xs sm:text-sm text-slate-700 space-y-1">
+              <p className="font-bold text-slate-900 tabular-nums">
+                Total Payable: {formatRupees(placedOrderPopup.totalAmount)}
+              </p>
+              <p>{placedOrderPopup.paySummary}</p>
+              {placedOrderPopup.riderSummary && (
+                <p className="font-semibold text-blue-800">
+                  Assigned Rider: {placedOrderPopup.riderSummary}
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              data-testid="order-placed-popup-ok-btn"
+              onClick={() => {
+                setPlacedOrderPopup(null);
+                setActiveTab('orders');
+              }}
+              className="w-full min-h-[48px] rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-[0.99] text-white font-display font-extrabold text-base cursor-pointer transition-all"
+            >
+              OK · Track My Order
+            </button>
+          </div>
+        </div>
+      )}
+
       <DiscountCelebrationOverlay
         totalSavings={celebrationSavings}
+        orderIdLabel={celebrationOrderLabel}
         durationSeconds={storeSettings.congratsPopupSeconds}
         onComplete={() => {
           setCelebrationSavings(null);
+          setCelebrationOrderLabel(null);
           setActiveTab('orders');
         }}
       />

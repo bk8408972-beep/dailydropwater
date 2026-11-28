@@ -24,6 +24,7 @@ import {
   getStatusLabel,
 } from '../../utils/domain';
 import { formatFloorLiftSummary } from '../../utils/storeSettings';
+import { formatOrderIdLabel } from '../../utils/orderSequence';
 import { getOrderPaymentBadge } from '../../utils/payment';
 import { copyPhoneNumber, triggerPhoneCall } from '../../utils/androidIntents';
 import {
@@ -375,10 +376,13 @@ export function CustomerMenuPages({
                       >
                         <div className="flex items-start justify-between gap-2 pb-2 border-b border-slate-100">
                           <div>
-                            <p className="text-xs font-semibold text-slate-500 tabular-nums">
-                              {order.id} · {formatTimestamp(order.createdAt)}
+                            <p className="text-xs font-semibold text-slate-500 tabular-nums flex flex-wrap items-center gap-1.5">
+                              <strong className="text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-md font-extrabold">
+                                {formatOrderIdLabel(order)}
+                              </strong>
+                              <span>· {formatTimestamp(order.createdAt)}</span>
                             </p>
-                            <p className="font-display text-base font-bold text-slate-900 mt-0.5">
+                            <p className="font-display text-base font-bold text-slate-900 mt-1">
                               {getStatusLabel(order.status)}
                             </p>
                           </div>

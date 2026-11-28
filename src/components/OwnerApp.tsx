@@ -42,6 +42,7 @@ import {
   updateStoreSettings,
   verifyOwnerPassword,
 } from '../services/firebaseDb';
+import { formatOrderIdLabel } from '../utils/orderSequence';
 import {
   getCompletedOrdersForCleanup,
   normalizeOrderStatus,
@@ -431,11 +432,12 @@ export function OwnerApp() {
       if (autoAssignedOrderIdsRef.current.has(order.id)) continue;
 
       const bestRider = pickBestOnlineRiderForAutoAssign(riders, workingOrders);
+      const orderLabel = formatOrderIdLabel(order);
       if (!bestRider) {
         if (!noOnlineRiderNotifiedRef.current.has(order.id)) {
           noOnlineRiderNotifiedRef.current.add(order.id);
           setToast(
-            `New order ${order.id} arrived — no Duty-ON riders online! Please assign manually.`
+            `New ${orderLabel} arrived — no Duty-ON riders online! Please assign manually.`
           );
         }
         continue;
@@ -463,7 +465,7 @@ export function OwnerApp() {
       })
         .then(() => {
           setToast(
-            `Auto-assigned ${order.id} to ${bestRider.name} (${bestRider.id}) — Rider App alerted.`
+            `Auto-assigned ${orderLabel} to ${bestRider.name} (${bestRider.id}) — Rider App alerted.`
           );
         })
         .catch(() => {

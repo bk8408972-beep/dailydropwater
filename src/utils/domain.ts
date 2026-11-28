@@ -11,6 +11,7 @@ import type {
   ServiceMode,
 } from '../types';
 import { resolveProductPricing } from './discounts';
+import { formatOrderIdLabel } from './orderSequence';
 
 export const COD_DISPLAY_LABEL = 'Cash on Delivery (Pay Cash to Rider)';
 
@@ -502,11 +503,12 @@ export function detectCustomerOrderChanges(
 
     const currentStatus = normalizeOrderStatus(order.status);
     if (prev.status !== currentStatus) {
+      const orderLabel = formatOrderIdLabel(order);
       switch (currentStatus) {
         case 'assigned':
           return {
             orderId: order.id,
-            headline: `Rider Assigned to Order ${order.id}`,
+            headline: `Rider Assigned (${orderLabel})`,
             detail: order.assignedRiderName
               ? `${order.assignedRiderName} has been assigned to your delivery.`
               : 'A DailyDrop rider has been assigned to your order.',
@@ -514,7 +516,7 @@ export function detectCustomerOrderChanges(
         case 'accepted':
           return {
             orderId: order.id,
-            headline: `Order ${order.id} Accepted by Rider!`,
+            headline: `${orderLabel} Accepted by Rider!`,
             detail: order.assignedRiderName
               ? `${order.assignedRiderName} accepted your order and is heading to the water plant.`
               : 'Your DailyDrop rider accepted your order and is heading to pickup.',
@@ -522,7 +524,7 @@ export function detectCustomerOrderChanges(
         case 'reached_pickup':
           return {
             orderId: order.id,
-            headline: `Rider Reached Water Plant (${order.id})`,
+            headline: `Rider Reached Water Plant (${orderLabel})`,
             detail: order.assignedRiderName
               ? `${order.assignedRiderName} is loading your water cans & chilled drinks now.`
               : 'Your order is being loaded at our water plant.',
@@ -530,7 +532,7 @@ export function detectCustomerOrderChanges(
         case 'out_for_delivery':
           return {
             orderId: order.id,
-            headline: `Order ${order.id} is Out for Delivery!`,
+            headline: `${orderLabel} is Out for Delivery!`,
             detail: order.assignedRiderName
               ? `${order.assignedRiderName} is on the way — tap Track Rider on Map. Keep ${formatRupees(order.totalAmount)} cash ready.`
               : `Your rider is on the way — keep ${formatRupees(order.totalAmount)} cash ready.`,
@@ -538,13 +540,13 @@ export function detectCustomerOrderChanges(
         case 'delivered':
           return {
             orderId: order.id,
-            headline: `Order ${order.id} Delivered!`,
+            headline: `${orderLabel} Delivered!`,
             detail: 'Thank you for ordering with DailyDrop Water. Delivery photo proof saved.',
           };
         case 'rejected':
           return {
             orderId: order.id,
-            headline: `Order ${order.id} Update`,
+            headline: `${orderLabel} Update`,
             detail: 'Your order could not be fulfilled. Please check My Orders.',
           };
         default:

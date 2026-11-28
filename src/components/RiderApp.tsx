@@ -52,6 +52,7 @@ import {
   isAwaitingRiderAcceptance,
   shouldAutoUnassignOrder,
 } from '../utils/orderTimer';
+import { formatOrderIdLabel } from '../utils/orderSequence';
 import { formatRelativeTime } from '../utils/geo';
 import {
   buildGoogleMapsDrivingDirectionsUrl,
@@ -979,13 +980,14 @@ export function RiderApp() {
       await dbPatch(`orders/${sanitizeFirebaseKey(order.id)}`, patch);
 
       const orderIsCod = isCodOrder(order);
+      const orderLabel = formatOrderIdLabel(order);
       const stepMessages: Record<typeof nextStatus, string> = {
-        accepted: `Order ${order.id} accepted! Added to your Active Delivery List.`,
-        reached_pickup: `Marked Reached Pickup Location for ${order.id}. Load items and tap Picked Up.`,
-        out_for_delivery: `Order ${order.id} is Out for Delivery! Live GPS tracking started for customer.`,
+        accepted: `${orderLabel} accepted! Added to your Active Delivery List.`,
+        reached_pickup: `Marked Reached Pickup Location for ${orderLabel}. Load items and tap Picked Up.`,
+        out_for_delivery: `${orderLabel} is Out for Delivery! Live GPS tracking started for customer.`,
         delivered: orderIsCod
-          ? `Order ${order.id} Delivered! Cash collected (${formatRupees(order.totalAmount)}).`
-          : `Order ${order.id} Delivered! UPI payment order (${formatRupees(order.totalAmount)}).`,
+          ? `${orderLabel} Delivered! Cash collected (${formatRupees(order.totalAmount)}).`
+          : `${orderLabel} Delivered! UPI payment order (${formatRupees(order.totalAmount)}).`,
       };
       setActionMessage(stepMessages[nextStatus]);
     } catch (err) {
@@ -1023,7 +1025,7 @@ export function RiderApp() {
         updatedAt: now,
       });
       setActionMessage(
-        `Order ${order.id} rejected and returned to Owner for re-assignment.`
+        `${formatOrderIdLabel(order)} rejected and returned to Owner for re-assignment.`
       );
     } catch (err) {
       setActionMessage(
@@ -1055,10 +1057,11 @@ export function RiderApp() {
         deliveryPhoto: compressed.dataUrl,
         updatedAt: Date.now(),
       });
+      const orderLabel = formatOrderIdLabel(order);
       setActionMessage(
         isCodOrder(order)
-          ? `Delivery photo saved for ${order.id} (${compressed.sizeKb} KB). You can now collect ${formatRupees(order.totalAmount)} cash and mark as Delivered.`
-          : `Delivery photo saved for ${order.id} (${compressed.sizeKb} KB). You can now mark this UPI order as Delivered.`
+          ? `Delivery photo saved for ${orderLabel} (${compressed.sizeKb} KB). You can now collect ${formatRupees(order.totalAmount)} cash and mark as Delivered.`
+          : `Delivery photo saved for ${orderLabel} (${compressed.sizeKb} KB). You can now mark this UPI order as Delivered.`
       );
     } catch (err) {
       setPhotoErrorByOrder((prev) => ({
@@ -1668,10 +1671,16 @@ export function RiderApp() {
                     <div>
                       <div className="flex items-start justify-between gap-2 pb-3 border-b border-slate-100">
                         <div>
-                          <div className="text-xs font-medium text-slate-500 tabular-nums">
-                            {order.id} · {formatTimestamp(order.createdAt)}
+                          <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-slate-500 tabular-nums">
+                            <span
+                              data-testid={`rider-order-id-${order.id}`}
+                              className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-900 font-display font-extrabold text-xs sm:text-sm"
+                            >
+                              {formatOrderIdLabel(order)}
+                            </span>
+                            <span>· {formatTimestamp(order.createdAt)}</span>
                           </div>
-                          <h3 className="font-display text-lg font-bold text-slate-900 mt-0.5">
+                          <h3 className="font-display text-lg font-bold text-slate-900 mt-1">
                             {order.customerName}
                           </h3>
                           <p className="text-xs font-bold text-blue-700 mt-0.5">
@@ -2204,11 +2213,19 @@ export function RiderApp() {
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="text-xs font-medium text-slate-500 tabular-nums">
-                            {order.id} · Delivered{' '}
-                            {formatTimestamp(order.deliveredAt || order.updatedAt)}
-                          </p>
-                          <h3 className="font-display text-base font-bold text-slate-900 mt-0.5 truncate">
+                          <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-slate-500 tabular-nums">
+                            <span
+                              data-testid={`rider-history-order-id-${order.id}`}
+                              className="inline-flex items-center px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-900 font-display font-extrabold text-xs"
+                            >
+                              {formatOrderIdLabel(order)}
+                            </span>
+                            <span>
+                              · Delivered{' '}
+                              {formatTimestamp(order.deliveredAt || order.updatedAt)}
+                            </span>
+                          </div>
+                          <h3 className="font-display text-base font-bold text-slate-900 mt-1 truncate">
                             {order.customerName}
                           </h3>
                           <p className="text-xs text-slate-600 mt-0.5">

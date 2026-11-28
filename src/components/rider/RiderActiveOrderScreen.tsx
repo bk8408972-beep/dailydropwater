@@ -29,6 +29,7 @@ import {
   getRiderAcceptanceCountdown,
   isAwaitingRiderAcceptance,
 } from '../../utils/orderTimer';
+import { formatOrderIdLabel } from '../../utils/orderSequence';
 import {
   buildGoogleMapsDrivingDirectionsUrl,
   buildPhoneCallUrl,
@@ -144,8 +145,8 @@ export function RiderActiveOrderScreen({
                   </span>
                 )}
               </div>
-              <p className="text-[11px] text-cyan-200 font-mono leading-tight truncate">
-                {order.id} · {getStatusLabel(order.status)}
+              <p className="text-xs text-cyan-200 font-bold leading-tight truncate tabular-nums">
+                {formatOrderIdLabel(order)} · {getStatusLabel(order.status)}
               </p>
             </div>
           </div>

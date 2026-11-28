@@ -2,6 +2,7 @@ import type {
   BulkBookingRequest,
   BulkBookingStatus,
   CustomerRecord,
+  DailyOrderCounterState,
   Order,
   OwnerAuthConfig,
   Product,
@@ -30,6 +31,10 @@ import {
   sanitizeTextInput,
   validateOrderWritePayload,
 } from '../utils/security';
+import {
+  buildDailyOrderKey,
+  computeNextDailyOrderCounter,
+} from '../utils/orderSequence';
 
 export const FIREBASE_DB_URL =
   'https://dailydrop-water-default-rtdb.asia-southeast1.firebasedatabase.app';
@@ -458,6 +463,78 @@ export async function ownerDeleteCustomer(mobile: string): Promise<void> {
   const safeMobile = sanitizeFirebaseKey(sanitizePhone10(mobile));
   if (!safeMobile) throw new Error('Invalid customer mobile.');
   await dbDelete(`customers/${safeMobile}`);
+}
+
+export interface AllocatedDailyOrderId {
+  orderNumber: number;
+  orderDateIst: string;
+  orderKey: string;
+}
+
+/**
+ * Atomically allocates the next sequential daily Order ID (1, 2, 3... up to 500+)
+ * in Firebase RTDB using native ETag compare-and-swap (X-Firebase-ETag + If-Match).
+ * Automatically resets back to 1 whenever the IST calendar date (YYYY-MM-DD) changes
+ * at 12:00 AM midnight IST.
+ */
+export async function allocateNextDailyOrderNumber(
+  nowMs: number = Date.now()
+): Promise<AllocatedDailyOrderId> {
+  const counterUrl = buildUrl('settings/dailyOrderCounter');
+  const maxAttempts = 12;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const getRes = await fetch(counterUrl, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'X-Firebase-ETag': 'true',
+      },
+      cache: 'no-store',
+    });
+
+    if (!getRes.ok) {
+      throw new Error(
+        `Unable to read daily order counter (${getRes.status}). Please retry.`
+      );
+    }
+
+    const etag = getRes.headers.get('etag') || getRes.headers.get('ETag') || 'null_etag';
+    const current = (await getRes.json()) as Partial<DailyOrderCounterState> | null;
+    const nextState = computeNextDailyOrderCounter(current, nowMs);
+
+    const putRes = await fetch(counterUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': etag,
+      },
+      body: JSON.stringify(nextState),
+    });
+
+    if (putRes.ok) {
+      triggerSubscribersForPath('settings/dailyOrderCounter');
+      return {
+        orderNumber: nextState.count,
+        orderDateIst: nextState.date,
+        orderKey: buildDailyOrderKey(nextState.date, nextState.count),
+      };
+    }
+
+    if (putRes.status === 412) {
+      // Concurrent order incremented the counter first — brief backoff and retry CAS
+      await new Promise((resolve) =>
+        setTimeout(resolve, 25 + Math.floor(Math.random() * 45))
+      );
+      continue;
+    }
+
+    throw new Error(
+      `Unable to allocate daily Order ID (${putRes.status}). Please retry.`
+    );
+  }
+
+  throw new Error('Order queue is busy right now. Please tap Place Order again.');
 }
 
 export async function placeCustomerOrder(

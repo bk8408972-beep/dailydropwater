@@ -8,6 +8,7 @@ import { playDiscountCelebrationClap } from '../utils/sound';
 
 interface DiscountCelebrationOverlayProps {
   totalSavings: number | null;
+  orderIdLabel?: string | null;
   durationSeconds?: number;
   onComplete: () => void;
 }
@@ -57,6 +58,7 @@ const CONFETTI_PIECES: ConfettiPiece[] = Array.from({ length: 48 }, (_, idx) => 
 
 export function DiscountCelebrationOverlay({
   totalSavings,
+  orderIdLabel = null,
   durationSeconds = DEFAULT_CONGRATS_POPUP_SECONDS,
   onComplete,
 }: DiscountCelebrationOverlayProps) {
@@ -155,10 +157,19 @@ export function DiscountCelebrationOverlay({
         <div
           data-testid="discount-celebration-emojis"
           aria-hidden="true"
-          className="text-6xl sm:text-7xl leading-none mb-5 tracking-wider drop-shadow-md animate-bounce"
+          className="text-6xl sm:text-7xl leading-none mb-4 tracking-wider drop-shadow-md animate-bounce"
         >
           👏🎉
         </div>
+
+        {orderIdLabel && (
+          <div
+            data-testid="discount-celebration-order-id"
+            className="inline-flex items-center justify-center mb-3 px-4 py-1.5 rounded-full bg-white text-emerald-900 font-display font-extrabold text-sm sm:text-base tracking-tight shadow-md tabular-nums"
+          >
+            {orderIdLabel}
+          </div>
+        )}
 
         <h2
           data-testid="discount-celebration-text"
